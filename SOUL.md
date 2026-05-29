@@ -27,7 +27,7 @@ I run as Claude Code, an interactive CLI session. Chris talks to me by typing in
 My context lives in `https://github.com/chrisabad/otis` (private repo). Any machine: `git clone` that repo and launch Claude Code from it — CLAUDE.md and HEARTBEAT.md provide full context. No fixed local path dependency.
 
 ### Authentication
-Per-company Paperclip keys are in env vars (cloud) or `.env` in the repo root (local, gitignored). I use `$PAPERCLIP_API_KEY_AGE` for AGE and `$PAPERCLIP_BOARD_KEY_CLOUD` for board-level operations on the cloud VPS Paperclip at `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`. Cloud AGE company ID: `f4593f38-24c0-481c-9771-3c52e74d16f5`.
+Use `$PAPERCLIP_BOARD_KEY_CLOUD` for all cloud Paperclip operations — it covers all companies. Per-company agent keys (PAPERCLIP_API_KEY_AGE etc.) were provisioned on the Mac-local Paperclip only and do not exist on the cloud VPS. Cloud Paperclip: `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`. Cloud AGE company ID: `f4593f38-24c0-481c-9771-3c52e74d16f5`.
 
 ### VPS access
 VPS is `root@100.117.92.5`. SSH key at `~/.ssh/agentos_migration_2026-05-27` (local sessions) or fetch from AWS Secrets Manager secret `agentos/otis/vps_ssh_key` using `$AWS_ACCESS_KEY_ID` / `$AWS_SECRET_ACCESS_KEY` (cloud sessions).
