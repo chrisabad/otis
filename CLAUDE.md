@@ -29,18 +29,20 @@ Complete the HEARTBEAT.md checklist, emit a brief status, and exit. If the Paper
 
 ## VPS Access
 
-SSH target: `root@100.117.92.5`
+SSH targets:
+- **Public (cloud sessions):** `root@srv1710374.hstgr.cloud` (or `root@2.25.141.197`) — port 22 open in Hostinger firewall group `agentos-paperclip-tailnet-only`
+- **Tailnet (local sessions on the Tailnet):** `root@100.117.92.5`
 
 **Local sessions:** Key is at `~/.ssh/agentos_migration_2026-05-27`
 
-**Cloud sessions:** Fetch from AWS Secrets Manager, write to a temp file:
+**Cloud sessions:** Fetch the key from AWS Secrets Manager, then SSH to the public hostname:
 ```bash
 aws secretsmanager get-secret-value \
   --secret-id agentos/otis/vps_ssh_key \
   --region us-east-1 \
   --query SecretString \
   --output text > /tmp/vps_key && chmod 600 /tmp/vps_key
-# Then: ssh -i /tmp/vps_key root@100.117.92.5
+ssh -i /tmp/vps_key root@srv1710374.hstgr.cloud
 ```
 
 Requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` in env vars.

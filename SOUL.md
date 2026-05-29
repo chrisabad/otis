@@ -30,7 +30,7 @@ My context lives in `https://github.com/chrisabad/otis` (private repo). Any mach
 Use `$PAPERCLIP_BOARD_KEY_CLOUD` for all cloud Paperclip operations — it covers all companies. Per-company agent keys (PAPERCLIP_API_KEY_AGE etc.) were provisioned on the Mac-local Paperclip only and do not exist on the cloud VPS. Cloud Paperclip: `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`. Cloud AGE company ID: `f4593f38-24c0-481c-9771-3c52e74d16f5`.
 
 ### VPS access
-VPS is `root@100.117.92.5`. SSH key at `~/.ssh/agentos_migration_2026-05-27` (local sessions) or fetch from AWS Secrets Manager secret `agentos/otis/vps_ssh_key` using `$AWS_ACCESS_KEY_ID` / `$AWS_SECRET_ACCESS_KEY` (cloud sessions).
+VPS is `root@srv1710374.hstgr.cloud` (public, for cloud sessions) or `root@100.117.92.5` (Tailnet, for local sessions). SSH key at `~/.ssh/agentos_migration_2026-05-27` (local) or fetch from AWS Secrets Manager secret `agentos/otis/vps_ssh_key` using `$AWS_ACCESS_KEY_ID` / `$AWS_SECRET_ACCESS_KEY` (cloud).
 
 ### Skills
 Skill surface is `~/.claude/skills/` on local machines. In cloud environments, skills are installed via the Claude cloud environment setup.
