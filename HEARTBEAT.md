@@ -1,95 +1,64 @@
 # HEARTBEAT.md — Otis
 
-## Autonomous Run Protocol
+## Current Context (2026-05-29)
 
-When Paperclip triggers a run (on-demand or automation), Otis is not in an interactive session with Chris. These runs should complete deterministically and exit cleanly.
+**Paperclip:** `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`  
+**AGE Company ID:** `f4593f38-24c0-481c-9771-3c52e74d16f5`  
+**Auth:** `Authorization: Bearer $PAPERCLIP_API_KEY_AGE`  
+**Board key (executionPolicy bypass):** `$PAPERCLIP_BOARD_KEY_CLOUD`  
+**VPS:** `root@100.117.92.5` — SSH key at `~/.ssh/agentos_migration_2026-05-27` (local) or AWS Secrets Manager `agentos/otis/vps_ssh_key` (cloud)
 
-**Source credentials first:**
-```bash
-source /Users/openclaw/.openclaw/workspace/agents/otis/.env
-```
+## Active Phase: AGE Phase 2 Stabilization
 
-## Checklist (execute in order, stop at first actionable item)
+Goal: make AGE autonomous, observable, and clean before onboarding FON. PRD at `memory/prds/2026-05-29-age-phase2-stabilization.md`.
 
-### 1. Check in_review issues assigned to Otis
+### Backlog (execute highest priority first)
 
-```bash
-source ~/.openclaw/workspace/agents/otis/.env
-curl -s "http://127.0.0.1:3101/api/companies/0f6e2b9b-12b2-4306-9798-16325c788e6f/issues?assigneeAgentId=2b5f4e67-ca9a-44a2-ac1b-9ec5816d09e8&status=in_review" \
-  -H "Authorization: Bearer $PAPERCLIP_API_KEY_AGE"
-```
+| ID | Priority | Title |
+|----|----------|-------|
+| AGE-85 | high | Wire cron triggers on all active AGE routines + fix stale maintenance references |
+| AGE-80 | high | Smoke test issue-trigger wakeup path end-to-end on VPS (Orion assigned) |
+| AGE-83 | high | Deploy notification service (port 8012) to VPS |
+| AGE-84 | high | Deploy memory service (8010) + broker (8011) to VPS |
+| AGE-77 | medium | Archive dispatch routine + enable topology audit |
+| AGE-78 | medium | Enable Routine Health Monitor + PR-bearing-done audit routines |
+| AGE-79 | medium | Deploy Redis + migrate broker dedup |
+| AGE-81 | medium | Sync 5 missing skills to vera agent profile |
+| AGE-82 | medium | Deploy mcporter + context7 MCP to VPS |
+| AGE-86 | medium | Deploy post-exec hooks for structured run logging |
+| AGE-88 | medium | Wire Langfuse tracing via LiteLLM env vars |
+| AGE-87 | low | Audit VPS RAM + plan Graphiti/Neo4j deployment |
 
-If Otis is acting as reviewer (not just returnAssignee), review and PATCH done/in_progress.
+### Pre-existing distinct scope (not Phase 2)
+- AGE-2: Set up FON company (next phase)
+- AGE-5: Clean up Issue Event Router plugin
+- AGE-24: GitOps for paperclip-issue-trigger
+- AGE-34: Hermes context layer (broader scope)
 
-### 2. Check in_progress issues for stalled work
+## Checklist (autonomous run)
 
-```bash
-curl -s "http://127.0.0.1:3101/api/companies/0f6e2b9b-12b2-4306-9798-16325c788e6f/issues?assigneeAgentId=2b5f4e67-ca9a-44a2-ac1b-9ec5816d09e8&status=in_progress" \
-  -H "Authorization: Bearer $PAPERCLIP_API_KEY_AGE"
-```
+1. **Check AGE board for stuck/blocked items:**
+   ```bash
+   curl -s -H "Authorization: Bearer $PAPERCLIP_API_KEY_AGE" \
+     "https://paperclip-ezk7.srv1710374.hstgr.cloud/api/companies/f4593f38-24c0-481c-9771-3c52e74d16f5/issues?limit=30" | \
+     python3 -c "import sys,json; issues=json.loads(sys.stdin.read()); \
+     [print(i['identifier'], i['status'], i['title'][:50]) for i in issues \
+     if i['status'] not in ('done','cancelled','backlog')]"
+   ```
+   Investigate anything in `blocked` or `in_progress` > 24h with no recent activity.
 
-Pick the highest-priority in_progress issue and advance it. If blocked, post a blocker comment.
+2. **Check VPS agent health:**
+   ```bash
+   curl -s -H "Authorization: Bearer $PAPERCLIP_BOARD_KEY_CLOUD" \
+     "https://paperclip-ezk7.srv1710374.hstgr.cloud/api/companies/f4593f38-24c0-481c-9771-3c52e74d16f5/agents" | \
+     python3 -c "import sys,json; [print(a['name'], a['status']) for a in json.loads(sys.stdin.read())]"
+   ```
+   If any agent is in `error` state: check profile ownership (chown 1000:1000), verify .env keys, wake agent.
 
-### 3. Check for @Otis mentions needing response
+3. **Advance highest-priority backlog item** if board is clean and agents are healthy.
 
-Search open issues for recent comments @-mentioning Otis. Respond to any review or approval requests.
-
-### 4. Nudge AGE-13339 sub-issues (SDLC simplification umbrella)
-
-```bash
-curl -s "http://127.0.0.1:3101/api/companies/0f6e2b9b-12b2-4306-9798-16325c788e6f/issues?parentId=0c1d84fb-e168-4c89-a421-3a5b176d4f72" \
-  -H "Authorization: Bearer $PAPERCLIP_API_KEY_AGE" | \
-  jq -r '.[] | "\(.identifier)\t\(.status)\t\(.priority)\t\(.title[0:60])"'
-```
-
-For any sub-issue still `todo` with no progress >48h:
-- AGE-13346 (critical-path Quinn/Vera/PIX/STU GitHub Apps via AGE-13177): if AGE-13177 still `in_review`, escalate to Chris via Juno.
-- AGE-13340–13345 (removals): can pick up directly or reassign to Hale (606b09a2 — owns `paperclip-issue-trigger`/recovery automation).
-- AGE-13349 (policy template): platform engineering work; reassign to Hale if Otis doesn't pick up.
-- AGE-13350 (AGE flip): unblocks as soon as AGE-13349 ships.
-- See `memory/project_sdlc_simplification_age_13339.md` for full context and acceptance criteria.
-
-### 5. Hire-roster GitHub Apps — all complete (2026-05-10)
-
-All 10 new agents (Tess, Theo, Iris, Joss, Wren, Tate, Vale, Roe, Pell, Bea) registered with GitHub Apps; creds saved to `~/.openclaw/credentials/github-apps/<slug>/`. Orphan duplicates cleaned. Final naming: AGE=Quinn+Ellis, KAL=Wren+Quinn, WEE=Tate+Vera, FON=Tess+Roe, PIX=Iris+Pell, STU=Joss+Bea, DIA=Vale+Theo.
-
-The callback handler (PID 69287, `:8765 --host 0.0.0.0`) and static server (PID 69313, `:8766`) can be killed when convenient. They're harmless if left running — the page is a status board now (mostly REGISTERED badges, no live registration buttons except cleanup tail).
-
-**Remaining hire-related work (real implementation, not bookkeeping):**
-
-a) **Hermes profile renames + scaffolding** — `~/.hermes/profiles/pix-reviewer/` should be renamed to `iris/` (and SOUL.md identity updated), `stu-reviewer/` to `joss/`. Wren, Vale, Roe, Pell, Bea need fresh profile dirs templated from Tess/Quinn. Tate already has a profile.
-
-b) **executionPolicy templates per company** — KAL/WEE/FON/PIX/STU/DIA each need their default policy template updated with the named reviewer + approver participant agentIds. Without this, the per-company SDLC flips (AGE-13351..13356) can't advance.
-
-Both are Axel's domain (agentos-sdlc skill). File proper hire-completion issues if not already filed.
-
-### 6. Watch the adapter-incident threads
-
-Three threads need polling each run until they close:
-
-1. **AGE-13466** (Hale — plugin-gate rebuild for patch 043). Active blocker — without it, agents can still mark issues done with unmerged PRs. Nudge Hale if `in_progress` >24h with no work product.
-2. **AGE-13510** (Hale — adapter_failed observability post-mortem). Lower priority but assigned to Hale post-13466. Confirm he picks it up after 13466 ships.
-3. **PR #82 cascade** — AGE-13340 was rebumped to `in_review` after merge. Verify it cascades through Quinn → Ellis to `done`. If stuck >48h post-merge, Otis comments to push it through.
-
-### 7. If nothing requires action
-
-Post a brief status heartbeat on the AGE-12389 project tracker and exit.
+4. **Exit cleanly.** Post a one-line status comment on the most recently touched issue.
 
 ## Exit Criteria
 
-A run is successful when it completes all checks and exits. Do NOT wait for user input. Do NOT loop. Execute the checklist, post any required update, then exit.
-
-**If Paperclip API is unreachable:** Exit immediately with a log message (don't fail — Paperclip may be restarting).
-
-## Active Project
-
-The Hermes-Native I&M project (AGE-12389) is the primary ongoing work. Remaining phases:
-- AGE-12619: Webhook handler migration off OpenClaw gateway-2
-- AGE-12494: Phase 5b skills migration
-- AGE-12488: Phase 5 retire OpenClaw Juno infra (**BLOCKED** — 1-2 week soak until ~2026-05-17)
-- AGE-12696: Infisical Phase 2 backup/restore drill
-- AGE-12397: Phase 6 smoke-test refactor
-
-## Smoke Test
-
-For a smoke test run: source .env, ping the API (`GET /api/companies/...`), confirm HTTP 200, post a smoke-test comment on AGE-12389, exit 0.
+Complete all checks, post any required update, exit. Do NOT wait for user input. If Paperclip API is unreachable, log and exit 0.

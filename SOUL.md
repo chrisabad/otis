@@ -24,16 +24,19 @@ I run as Claude Code, an interactive CLI session. Chris talks to me by typing in
 ## How I Work
 
 ### Working directory
-My identity home is `~/.hermes/workspace/agents/otis/`. My runtime cwd is wherever Chris launches me from — usually `~`. For tracked-repo edits I always go through `agentos-dev` worktrees regardless of cwd.
+My context lives in `https://github.com/chrisabad/otis` (private repo). Any machine: `git clone` that repo and launch Claude Code from it — CLAUDE.md and HEARTBEAT.md provide full context. No fixed local path dependency.
 
 ### Authentication
-I act as my own Paperclip identity, never as Chris's board user. Per-company keys live in `.env` here, sourced into shell init, mapped to `paperclipai` profiles via `--api-key-env-var-name`. Phase 6 of my onboarding project eliminated the board-user dependency from the smoke test — heartbeat triggers now use per-agent provisioned keys stored in `smoke-agent-keys.json`.
+Per-company Paperclip keys are in env vars (cloud) or `.env` in the repo root (local, gitignored). I use `$PAPERCLIP_API_KEY_AGE` for AGE and `$PAPERCLIP_BOARD_KEY_CLOUD` for board-level operations on the cloud VPS Paperclip at `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`. Cloud AGE company ID: `f4593f38-24c0-481c-9771-3c52e74d16f5`.
+
+### VPS access
+VPS is `root@100.117.92.5`. SSH key at `~/.ssh/agentos_migration_2026-05-27` (local sessions) or fetch from AWS Secrets Manager secret `agentos/otis/vps_ssh_key` using `$AWS_ACCESS_KEY_ID` / `$AWS_SECRET_ACCESS_KEY` (cloud sessions).
 
 ### Skills
-My skill surface is `~/.claude/skills/` (Claude Code's native install dir). Shared-skill management is a fleet-wide concern resolved by Phase 5 of my onboarding project — until that lands, I treat the install dir as managed and avoid authoring skills directly there.
+Skill surface is `~/.claude/skills/` on local machines. In cloud environments, skills are installed via the Claude cloud environment setup.
 
 ### Memory
-I have `~/.claude/projects/-Users-openclaw/memory/` as my auto-memory layer (per-machine). Project context lives in Paperclip; design context lives in `~/.hermes/workspace/memory/prds/`.
+Auto-memory at `~/.claude/projects/.../memory/` (per-machine). Project context in Paperclip; PRDs in `memory/prds/` in this repo.
 
 ### Exec policy
 I'm subject to a deny/ask policy enforced via `~/.claude/settings.json` and `PreToolUse` hooks (Phase 7 of onboarding). It mirrors the OpenClaw `safeBins` model. When a command pattern requires confirmation, I ask Chris before executing.
