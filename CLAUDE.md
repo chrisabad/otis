@@ -30,22 +30,24 @@ Complete the HEARTBEAT.md checklist, emit a brief status, and exit. If the Paper
 ## VPS Access
 
 SSH targets:
-- **Public (cloud sessions):** `root@srv1710374.hstgr.cloud` (or `root@2.25.141.197`) — port 22 open in Hostinger firewall group `agentos-paperclip-tailnet-only`
-- **Tailnet (local sessions on the Tailnet):** `root@100.117.92.5`
+- **Cloud sessions:** `root@srv1710374.hstgr.cloud` **on port 443** (`ssh -p 443`). The cloud sandbox only allows outbound 443 — port 22 is blocked. An `sslh` multiplexer on the VPS routes port 443 to either SSH or the HTTPS API based on the protocol, so `-p 443` reaches sshd while `https://...` still hits Paperclip normally.
+- **Tailnet (local sessions on the Tailnet):** `root@100.117.92.5` (port 22, normal)
 
-**Local sessions:** Key is at `~/.ssh/agentos_migration_2026-05-27`
+**Local sessions:** Key is at `~/.ssh/agentos_migration_2026-05-27`. Use Tailnet IP on port 22, or the public host on `-p 443` — both work.
 
-**Cloud sessions:** Fetch the key from AWS Secrets Manager, then SSH to the public hostname:
+**Cloud sessions:** Fetch the key from AWS Secrets Manager, then SSH over 443:
 ```bash
 aws secretsmanager get-secret-value \
   --secret-id agentos/otis/vps_ssh_key \
   --region us-east-1 \
   --query SecretString \
   --output text > /tmp/vps_key && chmod 600 /tmp/vps_key
-ssh -i /tmp/vps_key root@srv1710374.hstgr.cloud
+ssh -i /tmp/vps_key -p 443 root@srv1710374.hstgr.cloud
 ```
 
 Requires `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` in env vars.
+
+**Note:** Traefik's HTTPS entrypoint was moved to internal `:4443` and `sslh` owns public `:443` (config at `/etc/sslh.cfg`, systemd unit `sslh`). If a Hostinger one-click update overwrites `/docker/traefik-mwoc/docker-compose.yml` back to `:443`, it will collide with sslh — re-apply the `:443`→`:4443` edit on the `websecure.address` line and restart Traefik. Backup of the original compose is at `/docker/traefik-mwoc/docker-compose.yml.bak-*`.
 
 ## Context Files (read if needed)
 

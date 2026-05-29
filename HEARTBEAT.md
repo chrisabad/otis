@@ -5,7 +5,7 @@
 **Paperclip:** `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`  
 **AGE Company ID:** `f4593f38-24c0-481c-9771-3c52e74d16f5`  
 **Auth:** `Authorization: Bearer $PAPERCLIP_BOARD_KEY_CLOUD` (board key — use for all cloud operations)  
-**VPS:** `root@srv1710374.hstgr.cloud` (public, cloud) or `root@100.117.92.5` (Tailnet, local) — SSH key at `~/.ssh/agentos_migration_2026-05-27` (local) or AWS Secrets Manager `agentos/otis/vps_ssh_key` (cloud)
+**VPS:** cloud sessions → `ssh -p 443 root@srv1710374.hstgr.cloud` (sandbox blocks outbound 22; sslh multiplexes 443). Local Tailnet → `root@100.117.92.5` (port 22). Key: `~/.ssh/agentos_migration_2026-05-27` (local) or AWS Secrets Manager `agentos/otis/vps_ssh_key` (cloud).
 
 ## Active Phase: AGE Phase 2 Stabilization
 
