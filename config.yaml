@@ -1,0 +1,2 @@
+security:
+  redact_secrets: true

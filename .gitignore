@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+scratch/
+*.bak
+*.json
+!config.yaml
+[object Object]/
+.pytest_cache/
+.claude/
+__pycache__/
+*.pyc
