@@ -1,0 +1,105 @@
+{
+  "$schema": "./routing-rules.schema.json",
+  "companies": {
+    "dfd450ac-34c2-40a4-b3bc-4e4df9b59cea": {
+      "name": "WEE",
+      "agents": {
+        "implementer": "198f443d-7d5b-44b4-a72f-a67dbcb8475e",
+        "reviewer": "ecd60f5f-0628-4a41-98a8-332344ab1eae",
+        "orchestrator": "02b19d6a-c906-42ee-a301-4377f78e3146"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "0f6e2b9b-12b2-4306-9798-16325c788e6f": {
+      "name": "AGE (local)",
+      "agents": {
+        "implementer": "d2185ac3-fe8e-4e83-ac68-f29947f3ef18",
+        "reviewer": "334294f1-2e21-47ab-86ec-aed0487c9a7d",
+        "approver": "4d8114cc-f0af-4f76-9f38-db804a1ff6b4",
+        "orchestrator": "cdebff99-6651-42e6-8a81-b6b493202a3e"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "f4593f38-24c0-481c-9771-3c52e74d16f5": {
+      "name": "AGE",
+      "agents": {
+        "implementer": "d5bf34a0-f517-4d55-9f19-8b52bcb7722f",
+        "reviewer": "a3e4c733-5834-40b9-aea2-4ec0d0146772",
+        "approver": "a38cd7bc-b6e3-477f-a4b8-1e186d85a869",
+        "orchestrator": "a38cd7bc-b6e3-477f-a4b8-1e186d85a869"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "05fe3b35-2628-466f-be35-1bc985d88fa2": {
+      "name": "FON",
+      "agents": {
+        "implementer": "dfd8f497-4f32-47bb-9f9e-db7908f39820",
+        "reviewer": "e83e4e46-79bd-4303-b0af-d62cc394a1d3",
+        "orchestrator": "af1a1496-096a-4592-b536-241c46dad8ee"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "c8923cf7-1128-435f-8a6b-7f1b4d4fcd06": {
+      "name": "KAL",
+      "agents": {
+        "implementer": "ada5a3f8-e75c-4d2e-b79b-bc7ced1a4317",
+        "reviewer": "6d76a359-8e93-44a4-8165-47387838b834",
+        "orchestrator": "eb555746-3bfe-4abf-b75a-e3cf05501548"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "35536b37-3d4c-4375-a180-3ce2676f62fc": {
+      "name": "DIA",
+      "agents": {
+        "implementer": "00f582f4-67b3-471d-af93-73f3247db171",
+        "reviewer": "47a5b353-e3f6-4d35-b233-79b36eaa7f14",
+        "orchestrator": "37697d8f-8156-41f1-8c0c-11c596aef524"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "1a8640cc-7ccf-4387-9228-a85ad168c7f3": {
+      "name": "PIX",
+      "agents": {
+        "implementer": "608096f8-5d56-4aaf-a412-b67f2435a146",
+        "reviewer": "3eb51795-1204-4099-8427-a45e24870394",
+        "orchestrator": "cdebff99-6651-42e6-8a81-b6b493202a3e"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "c21b92aa-a2d7-46d3-8dda-243bd7c89a3a": {
+      "name": "STM",
+      "agents": {
+        "implementer": "5125b00a-aaae-4024-940b-87b97ea349e4",
+        "reviewer": "8704dfef-0ebd-4738-957b-82ce5735886b",
+        "orchestrator": "2cf807cd-8815-4917-82c1-be73a835f202"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    },
+    "9de6c4a9-7187-4701-9c96-b0674f267020": {
+      "name": "PER",
+      "agents": {
+        "implementer": "3469f1fb-cf77-44dc-ab19-5ade5f0fc400",
+        "orchestrator": "2cdc9205-1a63-4db9-b051-c7ed9fe336a1"
+      },
+      "workflow": {
+        "dispatchRequired": false
+      }
+    }
+  }
+}

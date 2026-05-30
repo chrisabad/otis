@@ -5,6 +5,7 @@ scratch/
 *.bak
 *.json
 !config.yaml
+!plugins/**/*.json
 [object Object]/
 .pytest_cache/
 .claude/
