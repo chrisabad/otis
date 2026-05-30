@@ -13,7 +13,7 @@ var __export = (target, all) => {
 
 // src/worker.ts
 import { execSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -23,8 +23,17 @@ function definePlugin(definition) {
   return Object.freeze({ definition });
 }
 
-// node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
+// node_modules/@paperclipai/plugin-sdk/dist/testing.js
+import { randomUUID } from "node:crypto";
+
+// node_modules/@paperclipai/plugin-sdk/dist/dev-server.js
+import { createReadStream, existsSync, statSync, watch } from "node:fs";
+import { mkdir, readdir, stat } from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
+
+// node_modules/@paperclipai/plugin-sdk/dist/worker-rpc-host.js
+import path2 from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -171,8 +180,8 @@ function runWorker(plugin2, moduleUrl, options) {
   const entry = process.argv[1];
   if (typeof entry !== "string")
     return;
-  const thisFile = path.resolve(fileURLToPath(moduleUrl));
-  const entryPath = path.resolve(entry);
+  const thisFile = path2.resolve(fileURLToPath(moduleUrl));
+  const entryPath = path2.resolve(entry);
   if (thisFile === entryPath) {
     startWorkerRpcHost({ plugin: plugin2 });
   }
@@ -1387,8 +1396,8 @@ function getErrorMap() {
 
 // node_modules/zod/v3/helpers/parseUtil.js
 var makeIssue = (params) => {
-  const { data, path: path2, errorMaps, issueData } = params;
-  const fullPath = [...path2, ...issueData.path || []];
+  const { data, path: path3, errorMaps, issueData } = params;
+  const fullPath = [...path3, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -1504,11 +1513,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path2, key) {
+  constructor(parent, value, path3, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path2;
+    this._path = path3;
     this._key = key;
   }
   get path() {
@@ -6473,7 +6482,6 @@ async function getLabelIds(companyId, labelNames) {
   }
 }
 var TRIGGER_STATUSES = /* @__PURE__ */ new Set(["todo", "triage", "unstarted"]);
-var DISPATCH_WAKEUP_STATUSES = /* @__PURE__ */ new Set(["todo", "backlog"]);
 var ALERT_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1e3;
 var ALERT_DEDUP_SHORT_WINDOW_MS = 60 * 1e3;
 var ALERT_DEDUP_COMMENT_TYPES = [
@@ -6533,11 +6541,17 @@ var DISPATCH_DEDUP_WINDOW_MS = 60 * 1e3;
 var dispatchDedupTracker = /* @__PURE__ */ new Map();
 var ORCH_COMPANY_DEDUP_MS = 30 * 1e3;
 var orchCompanyDedupTracker = /* @__PURE__ */ new Map();
+var COLD_QUEUE_SWEEP_INTERVAL_MS = 3 * 60 * 1e3;
+var COLD_QUEUE_DISPATCHABLE_STATUSES = /* @__PURE__ */ new Set(["todo", "backlog"]);
+var coldQueueSweepTracker = /* @__PURE__ */ new Map();
+var COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD = 3;
+var COLD_QUEUE_CIRCUIT_WINDOW_MS = 30 * 60 * 1e3;
 function shouldEscalateToOrchestrator(companyId, alertType) {
   const key = companyId + ":" + alertType;
   const now = Date.now();
   const last = orchCompanyDedupTracker.get(key);
-  if (last && now - last < ORCH_COMPANY_DEDUP_MS) return false;
+  if (last !== void 0 && now - last < ORCH_COMPANY_DEDUP_MS)
+    return false;
   orchCompanyDedupTracker.set(key, now);
   return true;
 }
@@ -7001,65 +7015,65 @@ This is a safety feature to prevent runaway issue cascades. If this is a legitim
         const reviewerAgentId = getAgentId(companyId, "reviewer");
         const approverAgentId = getAgentId(companyId, "approver");
         const stages = [
-            {
-              id: randomUUID(),
-              type: "review",
-              approvalsNeeded: 1,
-              participants: [
-                { id: randomUUID(), type: "agent", agentId: reviewerAgentId }
-              ]
-            }
-          ];
-          if (approverAgentId !== null) {
-            stages.push({
-              id: randomUUID(),
-              type: "approval",
-              approvalsNeeded: 1,
-              participants: [
-                { id: randomUUID(), type: "agent", agentId: approverAgentId }
-              ]
-            });
+          {
+            id: randomUUID2(),
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [
+              { id: randomUUID2(), type: "agent", agentId: reviewerAgentId }
+            ]
           }
-          const executionPolicy = {
-            mode: "normal",
-            commentRequired: true,
-            stages
-          };
-          try {
-            const patchRes = await apiFetch(
-              `${PAPERCLIP_API}/api/issues/${issueId}`,
+        ];
+        if (approverAgentId !== null) {
+          stages.push({
+            id: randomUUID2(),
+            type: "approval",
+            approvalsNeeded: 1,
+            participants: [
+              { id: randomUUID2(), type: "agent", agentId: approverAgentId }
+            ]
+          });
+        }
+        const executionPolicy = {
+          mode: "normal",
+          commentRequired: true,
+          stages
+        };
+        try {
+          const patchRes = await apiFetch(
+            `${PAPERCLIP_API}/api/issues/${issueId}`,
+            {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ executionPolicy })
+            }
+          );
+          if (patchRes.ok) {
+            ctx.logger.info(
+              "A.4: Auto-applied executionPolicy to new issue",
               {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ executionPolicy })
-              }
-            );
-            if (patchRes.ok) {
-              ctx.logger.info(
-                "A.4: Auto-applied executionPolicy to new issue",
-                {
-                  issueId,
-                  identifier: issue?.identifier,
-                  status,
-                  reviewerAgentId,
-                  approverAgentId,
-                  companyId
-                }
-              );
-            } else {
-              ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
                 issueId,
                 identifier: issue?.identifier,
-                status: patchRes.status
-              });
-            }
-          } catch (err) {
-            ctx.logger.error("A.4: Error auto-applying executionPolicy", {
+                status,
+                reviewerAgentId,
+                approverAgentId,
+                companyId
+              }
+            );
+          } else {
+            ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
               issueId,
               identifier: issue?.identifier,
-              err: String(err)
+              status: patchRes.status
             });
           }
+        } catch (err) {
+          ctx.logger.error("A.4: Error auto-applying executionPolicy", {
+            issueId,
+            identifier: issue?.identifier,
+            err: String(err)
+          });
+        }
       }
       if (!TRIGGER_STATUSES.has(status))
         return;
@@ -7749,14 +7763,14 @@ python3 /Users/openclaw/.openclaw/workspace/skills/gate-check-verify/gate_check_
         }
         return claims;
       }
-      async function verifyFilePath(path2) {
+      async function verifyFilePath(path3) {
         try {
           const { execSync: execSync2 } = __require("node:child_process");
-          execSync2(`test -e "${path2}"`, { stdio: "pipe" });
+          execSync2(`test -e "${path3}"`, { stdio: "pipe" });
           return null;
         } catch {
           return {
-            claim: path2,
+            claim: path3,
             type: "file",
             reason: "File not found (test -e failed)"
           };
@@ -8519,257 +8533,6 @@ This is a defense-in-depth sweep \u2014 the original bug (cold-queue recovery no
         }
       }
     }
-    const STALE_AGENT_THRESHOLD_MS = 15 * 60 * 1e3;
-    const STALE_AGENT_WATCHDOG_INTERVAL_MS = 5 * 60 * 1e3;
-    async function sweepStaleAgents() {
-      for (const [companyId, companyCfg] of Object.entries(
-        routingConfig.companies
-      )) {
-        try {
-          const agentsRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/agents`
-          );
-          if (!agentsRes.ok)
-            continue;
-          const agents = await agentsRes.json();
-          for (const agent of agents) {
-            if (agent.status !== "running")
-              continue;
-            const heartbeat = agent.runtimeConfig?.heartbeat;
-            if (!heartbeat || !heartbeat.enabled) {
-            }
-            const lastHeartbeatAt = agent.lastHeartbeatAt ? new Date(agent.lastHeartbeatAt).getTime() : 0;
-            const staleForMs = Date.now() - lastHeartbeatAt;
-            if (staleForMs < STALE_AGENT_THRESHOLD_MS)
-              continue;
-            ctx.logger.info("Stale agent detected \u2014 resetting to idle", {
-              event: "agent_stuck_state",
-              agentId: agent.id,
-              agentName: agent.name,
-              companyId,
-              lastHeartbeatAt: agent.lastHeartbeatAt,
-              staleForMs,
-              thresholdMs: STALE_AGENT_THRESHOLD_MS
-            });
-            try {
-              const resetRes = await apiFetch(
-                `${PAPERCLIP_API}/api/agents/${agent.id}`,
-                {
-                  method: "PATCH",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ status: "idle" })
-                }
-              );
-              if (resetRes.ok) {
-                ctx.logger.info("Stale agent recovered \u2192 idle", {
-                  agentId: agent.id,
-                  agentName: agent.name,
-                  companyId,
-                  staleForMs
-                });
-              } else {
-                const errBody = await resetRes.text();
-                ctx.logger.warn("Failed to reset stale agent status", {
-                  agentId: agent.id,
-                  agentName: agent.name,
-                  companyId,
-                  status: resetRes.status,
-                  body: errBody
-                });
-              }
-            } catch (err) {
-              ctx.logger.warn("Error resetting stale agent", {
-                agentId: agent.id,
-                agentName: agent.name,
-                companyId,
-                error: String(err)
-              });
-            }
-          }
-        } catch (err) {
-          ctx.logger.warn(
-            "Stale agent watchdog: error scanning company agents",
-            {
-              companyId,
-              error: String(err)
-            }
-          );
-        }
-      }
-    }
-    const COLD_QUEUE_SWEEP_INTERVAL_MS = 3 * 60 * 1e3;
-    const COLD_QUEUE_DISPATCHABLE_STATUSES = /* @__PURE__ */ new Set(["todo", "backlog"]);
-    const coldQueueSweepTracker = /* @__PURE__ */ new Map();
-    const COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD = 3;
-    const COLD_QUEUE_CIRCUIT_WINDOW_MS = 30 * 60 * 1e3;
-    async function sweepColdQueue() {
-      for (const [companyId, companyCfg] of Object.entries(
-        routingConfig.companies
-      )) {
-        try {
-          const dispatcherId = getAgentId(companyId, "dispatcher");
-          const agentsWokenThisSweep = /* @__PURE__ */ new Set();
-          const issuesRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`
-          );
-          if (!issuesRes.ok) continue;
-          const issues = await issuesRes.json();
-          if (!Array.isArray(issues)) continue;
-          const agentsRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/agents`
-          );
-          if (!agentsRes.ok) continue;
-          const agents = await agentsRes.json();
-          if (!Array.isArray(agents)) continue;
-          const agentStatusMap = new Map();
-          for (const agent of agents) {
-            if (agent.id) agentStatusMap.set(agent.id, agent.status || "unknown");
-          }
-          let dispatched = 0;
-          let skipped = 0;
-          for (const issue of issues) {
-            const assigneeAgentId = issue.assigneeAgentId;
-            if (!assigneeAgentId) {
-              skipped++;
-              continue;
-            }
-            if (!COLD_QUEUE_DISPATCHABLE_STATUSES.has((issue.status ?? "").toLowerCase())) {
-              skipped++;
-              continue;
-            }
-            if (issue.executionRunId) {
-              ctx.logger.debug("Cold-queue sweep: skipping issue with active execution run", {
-                event: "cold_queue_skip_has_run",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                executionRunId: issue.executionRunId
-              });
-              skipped++;
-              continue;
-            }
-            if (issue.executionLockedAt) {
-              const lockAgeMs = Date.now() - new Date(issue.executionLockedAt).getTime();
-              if (lockAgeMs < STALE_EXECUTION_LOCK_THRESHOLD_MS) {
-                ctx.logger.debug("Cold-queue sweep: skipping issue with fresh execution lock", {
-                  event: "cold_queue_skip_fresh_lock",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  lockAgeMs
-                });
-                skipped++;
-                continue;
-              }
-            }
-            const shouldWake = await shouldDispatchWakeup(issue.id, companyId, ctx);
-            if (!shouldWake) {
-              ctx.logger.info("Cold-queue sweep: dedup window or lock skip", {
-                event: "cold_queue_dedup_skip",
-                issueId: issue.id,
-                identifier: issue.identifier
-              });
-              skipped++;
-              continue;
-            }
-            const agentStatus = agentStatusMap.get(assigneeAgentId);
-            if (agentStatus === "running") {
-              ctx.logger.debug("Cold-queue sweep: skipping — agent already running", {
-                event: "cold_queue_skip_agent_running",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                assigneeAgentId,
-                agentStatus
-              });
-              skipped++;
-              continue;
-            }
-            const now = Date.now();
-            const existingTs = (coldQueueSweepTracker.get(issue.id) ?? []).filter(
-              (ts) => now - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS
-            );
-            if (existingTs.length >= COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD) {
-              ctx.logger.warn("Cold-queue sweep: circuit breaker — skipping repeatedly dispatched issue", {
-                event: "cold_queue_circuit_breaker",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                recentAttempts: existingTs.length
-              });
-              skipped++;
-              continue;
-            }
-            const wakeTargetId = dispatcherId || assigneeAgentId;
-            if (!wakeTargetId) {
-              skipped++;
-              continue;
-            }
-            if (agentsWokenThisSweep.has(wakeTargetId)) {
-              ctx.logger.debug("Cold-queue sweep: skipping — target already woken this sweep", {
-                event: "cold_queue_skip_target_woken",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                wakeTargetId
-              });
-              skipped++;
-              continue;
-            }
-            try {
-              const wakeRes = await apiFetch(
-                `${PAPERCLIP_API}/api/agents/${wakeTargetId}/wakeup`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ reason: "cold_queue_dispatch" })
-                }
-              );
-              if (wakeRes.ok) {
-                dispatched++;
-                agentsWokenThisSweep.add(wakeTargetId);
-                existingTs.push(now);
-                coldQueueSweepTracker.set(issue.id, existingTs);
-                ctx.logger.info("Cold-queue sweep: dispatched wakeup for cold assigned issue", {
-                  event: "cold_queue_dispatched",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  assigneeAgentId,
-                  agentStatus: agentStatus ?? "unknown",
-                  wakeTargetId,
-                  dispatcherActive: !!dispatcherId
-                });
-              } else {
-                const errBody = await wakeRes.text();
-                ctx.logger.warn("Cold-queue sweep: wakeup failed", {
-                  event: "cold_queue_wakeup_failed",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  wakeTargetId,
-                  status: wakeRes.status,
-                  body: errBody
-                });
-              }
-            } catch (err) {
-              ctx.logger.warn("Cold-queue sweep: error sending wakeup", {
-                event: "cold_queue_wakeup_error",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                wakeTargetId,
-                error: String(err)
-              });
-            }
-          }
-          ctx.logger.info("Cold-queue sweep completed for company", {
-            event: "cold_queue_sweep_done",
-            companyId,
-            totalIssues: issues.length,
-            dispatched,
-            skipped
-          });
-        } catch (err) {
-          ctx.logger.warn("Cold-queue sweep: error scanning company", {
-            companyId,
-            error: String(err)
-          });
-        }
-      }
-    }
     const XCA_CIRCUIT_BREAKER_THRESHOLD = 3;
     const XCA_CIRCUIT_WINDOW_MS = 30 * 60 * 1e3;
     const XCA_SWEEP_INTERVAL_MS = 10 * 60 * 1e3;
@@ -9229,16 +8992,173 @@ This typically means a prior agent execution timed out or disappeared without cl
         }
       }
     }
-    const staleAgentInitial = setTimeout(() => {
-      void sweepStaleAgents();
-    }, 3e4);
-    if (staleAgentInitial.unref)
-      staleAgentInitial.unref();
-    const staleAgentInterval = setInterval(() => {
-      void sweepStaleAgents();
-    }, STALE_AGENT_WATCHDOG_INTERVAL_MS);
-    if (staleAgentInterval.unref)
-      staleAgentInterval.unref();
+    async function sweepColdQueue() {
+      for (const [companyId] of Object.entries(routingConfig.companies)) {
+        try {
+          const dispatcherId = getAgentId(companyId, "dispatcher");
+          const agentsWokenThisSweep = /* @__PURE__ */ new Set();
+          const issuesRes = await apiFetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`
+          );
+          if (!issuesRes.ok)
+            continue;
+          const issues = await issuesRes.json();
+          if (!Array.isArray(issues))
+            continue;
+          const agentsRes = await apiFetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/agents`
+          );
+          if (!agentsRes.ok)
+            continue;
+          const agents = await agentsRes.json();
+          if (!Array.isArray(agents))
+            continue;
+          const agentStatusMap = /* @__PURE__ */ new Map();
+          for (const agent of agents) {
+            if (agent.id)
+              agentStatusMap.set(agent.id, agent.status ?? "unknown");
+          }
+          let dispatched = 0;
+          let skipped = 0;
+          for (const issue of issues) {
+            const assigneeAgentId = issue.assigneeAgentId ?? null;
+            if (!assigneeAgentId) {
+              skipped++;
+              continue;
+            }
+            if (!COLD_QUEUE_DISPATCHABLE_STATUSES.has((issue.status ?? "").toLowerCase())) {
+              skipped++;
+              continue;
+            }
+            if (issue.executionRunId) {
+              ctx.logger.debug("Cold-queue sweep: skipping issue with active execution run", {
+                event: "cold_queue_skip_has_run",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                executionRunId: issue.executionRunId
+              });
+              skipped++;
+              continue;
+            }
+            if (issue.executionLockedAt) {
+              const lockAgeMs = Date.now() - new Date(issue.executionLockedAt).getTime();
+              if (lockAgeMs < STALE_EXECUTION_LOCK_THRESHOLD_MS) {
+                ctx.logger.debug("Cold-queue sweep: skipping issue with fresh execution lock", {
+                  event: "cold_queue_skip_fresh_lock",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  lockAgeMs
+                });
+                skipped++;
+                continue;
+              }
+            }
+            const shouldWake = await shouldDispatchWakeup(issue.id, companyId, ctx);
+            if (!shouldWake) {
+              ctx.logger.info("Cold-queue sweep: dedup window or lock skip", {
+                event: "cold_queue_dedup_skip",
+                issueId: issue.id,
+                identifier: issue.identifier
+              });
+              skipped++;
+              continue;
+            }
+            const agentStatus = agentStatusMap.get(assigneeAgentId);
+            if (agentStatus === "running") {
+              ctx.logger.debug("Cold-queue sweep: skipping \u2014 agent already running", {
+                event: "cold_queue_skip_agent_running",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                assigneeAgentId,
+                agentStatus
+              });
+              skipped++;
+              continue;
+            }
+            const wakeTargetId = dispatcherId ?? assigneeAgentId;
+            if (agentsWokenThisSweep.has(wakeTargetId)) {
+              ctx.logger.debug("Cold-queue sweep: skipping \u2014 target already woken this sweep", {
+                event: "cold_queue_skip_target_woken",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                wakeTargetId
+              });
+              skipped++;
+              continue;
+            }
+            const now = Date.now();
+            const existingTs = (coldQueueSweepTracker.get(issue.id) ?? []).filter(
+              (ts) => now - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS
+            );
+            if (existingTs.length >= COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD) {
+              ctx.logger.warn("Cold-queue sweep: circuit breaker \u2014 skipping repeatedly dispatched issue", {
+                event: "cold_queue_circuit_breaker",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                recentAttempts: existingTs.length
+              });
+              skipped++;
+              continue;
+            }
+            try {
+              const wakeRes = await apiFetch(
+                `${PAPERCLIP_API}/api/agents/${wakeTargetId}/wakeup`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ reason: "cold_queue_dispatch" })
+                }
+              );
+              if (wakeRes.ok) {
+                dispatched++;
+                agentsWokenThisSweep.add(wakeTargetId);
+                existingTs.push(now);
+                coldQueueSweepTracker.set(issue.id, existingTs);
+                ctx.logger.info("Cold-queue sweep: dispatched wakeup for cold assigned issue", {
+                  event: "cold_queue_dispatched",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  assigneeAgentId,
+                  agentStatus: agentStatus ?? "unknown",
+                  wakeTargetId,
+                  dispatcherActive: !!dispatcherId
+                });
+              } else {
+                const errBody = await wakeRes.text();
+                ctx.logger.warn("Cold-queue sweep: wakeup failed", {
+                  event: "cold_queue_wakeup_failed",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  wakeTargetId,
+                  status: wakeRes.status,
+                  body: errBody
+                });
+              }
+            } catch (err) {
+              ctx.logger.warn("Cold-queue sweep: error sending wakeup", {
+                event: "cold_queue_wakeup_error",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                wakeTargetId,
+                error: String(err)
+              });
+            }
+          }
+          ctx.logger.info("Cold-queue sweep completed for company", {
+            event: "cold_queue_sweep_done",
+            companyId,
+            totalIssues: issues.length,
+            dispatched,
+            skipped
+          });
+        } catch (err) {
+          ctx.logger.warn("Cold-queue sweep: error scanning company", {
+            companyId,
+            error: String(err)
+          });
+        }
+      }
+    }
     const cqrInitial = setTimeout(() => {
       void sweepCompletedIssues();
     }, 6e4);
@@ -9292,29 +9212,28 @@ This typically means a prior agent execution timed out or disappeared without cl
     const dedupPruneInterval = setInterval(() => {
       pruneDispatchDedupTracker();
       pruneRecoveryRateTracker();
-      (function pruneOrchCompanyDedupTracker() { const now = Date.now(); for (const [k, ts] of orchCompanyDedupTracker) { if (now - ts >= ORCH_COMPANY_DEDUP_MS) orchCompanyDedupTracker.delete(k); } })();
-      (function pruneColdQueueTracker() {
-        const now = Date.now();
-        for (const [issueId, timestamps] of coldQueueSweepTracker) {
-          const filtered = timestamps.filter((ts) => now - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS);
-          if (filtered.length === 0) {
-            coldQueueSweepTracker.delete(issueId);
-          } else {
-            coldQueueSweepTracker.set(issueId, filtered);
-          }
-        }
-      })();
+      for (const [k, ts] of orchCompanyDedupTracker) {
+        if (Date.now() - ts >= ORCH_COMPANY_DEDUP_MS)
+          orchCompanyDedupTracker.delete(k);
+      }
+      for (const [issueId, timestamps] of coldQueueSweepTracker) {
+        const filtered = timestamps.filter((ts) => Date.now() - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS);
+        if (filtered.length === 0)
+          coldQueueSweepTracker.delete(issueId);
+        else
+          coldQueueSweepTracker.set(issueId, filtered);
+      }
     }, 60 * 1e3);
     if (dedupPruneInterval.unref)
       dedupPruneInterval.unref();
     ctx.logger.info(
-      "Issue Trigger v1.44.0+age114 \u2014 event-routing + cold-queue dispatch sweep (AGE-114). Recovery cascade guard (AGE-8553): depth limit (3 ancestors) + per-company rate limit (5/24h) for stranded_issue_recovery issues, blocked:cascade label for observability. Checkout-level dispatch dedup (AGE-7292). Stale execution lock sweep + concurrent run guard (AGE-7276). Review gate (AGE-7550). Agent issue-creation rate limit (AGE-8523). Cold-queue dispatch sweep for assigned-but-never-started issues (AGE-114)."
+      "Issue Trigger v1.37.0 \u2014 event-routing only. Recovery cascade guard (AGE-8553): depth limit (3 ancestors) + per-company rate limit (5/24h) for stranded_issue_recovery issues, blocked:cascade label for observability. Checkout-level dispatch dedup (AGE-7292). Stale execution lock sweep + concurrent run guard (AGE-7276). Review gate (AGE-7550). Agent issue-creation rate limit (AGE-8523)."
     );
   },
   async onHealth() {
     return {
       status: "ok",
-      message: "v1.44.0+age114 \u2014 Event-routing + cold-queue dispatch sweep (AGE-114). No drain loop. Paperclip native heartbeat + executionPolicy handle wakeup and review. Dispatcher wakeup gated on dispatcher-agent presence (AGE-691). A.4 executionPolicy auto-apply on issue.created. Plan-first demotion (planRequired). Blocked-label validation. Auto-dependency detection (AGE-306). QA rejection circuit breaker (AGE-318). Recovery cascade guard (AGE-8553). Checkout-level dispatch dedup (AGE-7292). Retry storm breaker (AGE-5123). Continuation-requeue (AGE-5447). Alert dedup (AGE-5261). Dependency-aware auto-unblock (AGE-6080). Gate-check evidence enforcement (AGE-6129). Stale execution lock sweep (AGE-7276). Agent issue-creation rate limit (AGE-8523). Cold-queue dispatch sweep for assigned-but-never-started issues (AGE-114)."
+      message: "v1.40.0 \u2014 Event-routing only. No drain loop. Paperclip native heartbeat + executionPolicy handle wakeup and review. Dispatcher wakeup gated on dispatcher-agent presence (AGE-691). A.4 executionPolicy auto-apply on issue.created. Plan-first demotion (planRequired). Blocked-label validation. Auto-dependency detection (AGE-306). QA rejection circuit breaker (AGE-318). Recovery cascade guard (AGE-8553). Checkout-level dispatch dedup (AGE-7292). Retry storm breaker (AGE-5123). Continuation-requeue (AGE-5447). Alert dedup (AGE-5261). Dependency-aware auto-unblock (AGE-6080). Gate-check evidence enforcement (AGE-6129). Stale execution lock sweep (AGE-7276). Agent issue-creation rate limit (AGE-8523)."
     };
   }
 });
