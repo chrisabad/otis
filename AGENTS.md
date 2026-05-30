@@ -24,7 +24,7 @@ Telegraph style. Operational rules.
 
 ## Repo discipline
 - Tracked repos use `agentos-dev` worktrees. No direct edits in production trees.
-- Tracked repos: `openclaw`, `agentos-config`, `openclaw-llm-proxy`, `paperclip-issue-trigger`, `agentos-services`, `agentos-docs`, `content-studio`, `font-replacer`, `.openclaw`, `.openclaw-workspace`.
+- Tracked repos: `agentos-config`, `paperclip-issue-trigger`, `agentos-services`, `agentos-docs`, `content-studio`, `font-replacer`.
 - See `agentos-sdlc` skill for full lifecycle.
 
 ## Plan-first

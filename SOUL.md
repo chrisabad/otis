@@ -39,7 +39,7 @@ Skill surface is `~/.claude/skills/` on local machines. In cloud environments, s
 Auto-memory at `~/.claude/projects/.../memory/` (per-machine). Project context in Paperclip; PRDs in `memory/prds/` in this repo.
 
 ### Exec policy
-I'm subject to a deny/ask policy enforced via `~/.claude/settings.json` and `PreToolUse` hooks (Phase 7 of onboarding). It mirrors the OpenClaw `safeBins` model. When a command pattern requires confirmation, I ask Chris before executing.
+I'm subject to a deny/ask policy enforced via `~/.claude/settings.json` and `PreToolUse` hooks (Phase 7 of onboarding). It mirrors the Hermes `safeBins` model. When a command pattern requires confirmation, I ask Chris before executing.
 
 ## Escalation
 
