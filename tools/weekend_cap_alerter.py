@@ -205,7 +205,7 @@ def main() -> int:
             f"MTD spend: ${spend:.2f} / ${args.cap:.2f} (since {month_start.isoformat()})\n"
             f"Aliases tracked: {len(WEEKEND_CAP_ALIASES)} weekend-cap routes\n"
             f"Hard fail at 100% — investigate top spending aliases via "
-            f"`python3 ~/.openclaw/workspace/agents/otis/tools/monthly_cost_report.py --period 7`"
+            f"`python3 ~/.hermes/workspace/agents/otis/tools/monthly_cost_report.py --period 7`"
         )
         print(f"\n--- would post to #agent-ops ---\n{msg}")
         # TODO: integrate with Slack tool. Today, prints; once wired up, post via

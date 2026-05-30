@@ -32,7 +32,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 LITELLM_ENV = os.path.expanduser("~/.litellm/.env")
-OTIS_ENV = os.path.expanduser("~/.openclaw/workspace/agents/otis/.env")
+OTIS_ENV = os.path.expanduser("~/.hermes/workspace/agents/otis/.env")
 PAPERCLIP_BASE = "http://127.0.0.1:3101/api"
 
 COMPANIES = {
