@@ -1,12 +1,14 @@
-// IMPORTANT: This file was extracted from dist/worker.js.map on 2026-05-30.
-// It reflects the state BEFORE the following fixes were applied to dist/worker.js:
-//   - A.4 executionPolicy null check: !issue.executionPolicy → !issue.executionPolicy?.stages?.length
-//   - Prefix detection removed (isGateIssue / needsApproval guards deleted)
-//   - Orchestrator wakeup dedup added (shouldEscalateToOrchestrator per-company, 30s window)
-//   - Dispatcher dead code removed (3 wakeup blocks, ~126 lines)
-//   - Manifest capabilities updated
-// AGE-24: Reconstruct a proper build pipeline so future changes go through TS → build → deploy.
-// Until then, dist/worker.js is the authoritative deployed artifact.
+// Source recovered from dist/worker.js.map on 2026-05-30 and updated with all fixes.
+// This file IS the authoritative source. dist/worker.js must be rebuilt from this source.
+// Build: npm install && npm run build  (esbuild, see package.json)
+// Deploy: scp dist/worker.js root@100.117.92.5:/docker/paperclip-ezk7/data/plugins/kaleidoscope-issue-trigger/dist/worker.js
+//
+// Fixes applied 2026-05-30 (also reflected in dist/worker.js on VPS):
+//   - A.4: !issue.executionPolicy → !issue.executionPolicy?.stages?.length
+//   - Prefix detection (isGateIssue/needsApproval) removed; approval always applies
+//   - Orchestrator wakeup dedup: shouldEscalateToOrchestrator() 30s per-company window
+//   - Dispatcher dead code removed (3 wakeup blocks retired with dispatcher role)
+//   - Manifest capabilities updated (issues.write, comments.write, agents.manage)
 
 /**
  * Issue Trigger Plugin — v1.44.0
@@ -789,6 +791,25 @@ const DISPATCH_DEDUP_WINDOW_MS = 60 * 1000; // 60 seconds — skip redundant wak
 const dispatchDedupTracker = new Map<string, number>(); // issueId → last wakeup timestamp
 
 /**
+ * Per-company orchestrator escalation dedup.
+ * When multiple issues hit circuit breakers simultaneously (e.g., on container restart),
+ * each would normally post an alert comment that wakes the orchestrator. This tracker
+ * limits escalation to once per company per alert type per 30 seconds, preventing
+ * burst storms where N simultaneous circuit breakers generate N simultaneous wakeups.
+ */
+const ORCH_COMPANY_DEDUP_MS = 30 * 1000; // 30 seconds
+const orchCompanyDedupTracker = new Map<string, number>(); // `${companyId}:${alertType}` → timestamp
+
+function shouldEscalateToOrchestrator(companyId: string, alertType: string): boolean {
+  const key = companyId + ":" + alertType;
+  const now = Date.now();
+  const last = orchCompanyDedupTracker.get(key);
+  if (last !== undefined && now - last < ORCH_COMPANY_DEDUP_MS) return false;
+  orchCompanyDedupTracker.set(key, now);
+  return true;
+}
+
+/**
  * AGE-8523: Agent issue-creation rate limit constants.
  * Limits the number of issues an agent can create per hour to prevent
  * runaway cascades (e.g., 864 "Recover stalled issue" chain during a
@@ -1495,79 +1516,73 @@ const plugin = definePlugin({
         status !== "cancelled" &&
         isConfiguredCompany(companyId) &&
         getAgentId(companyId, "reviewer") !== null &&
-        !issue.executionPolicy
+        !issue.executionPolicy?.stages?.length
       ) {
         const reviewerAgentId = getAgentId(companyId, "reviewer") as string;
         const approverAgentId = getAgentId(companyId, "approver");
-        const isGateIssue = /^\[gate\]/i.test(issueTitle);
-        const needsApproval =
-          approverAgentId !== null &&
-          /^\[(infra|deploy|config)\]/i.test(issueTitle);
 
-        if (!isGateIssue) {
-          const stages: object[] = [
+        const stages: object[] = [
+          {
+            id: randomUUID(),
+            type: "review",
+            approvalsNeeded: 1,
+            participants: [
+              { id: randomUUID(), type: "agent", agentId: reviewerAgentId },
+            ],
+          },
+        ];
+
+        if (approverAgentId !== null) {
+          stages.push({
+            id: randomUUID(),
+            type: "approval",
+            approvalsNeeded: 1,
+            participants: [
+              { id: randomUUID(), type: "agent", agentId: approverAgentId },
+            ],
+          });
+        }
+
+        const executionPolicy = {
+          mode: "normal",
+          commentRequired: true,
+          stages,
+        };
+
+        try {
+          const patchRes = await apiFetch(
+            `${PAPERCLIP_API}/api/issues/${issueId}`,
             {
-              id: randomUUID(),
-              type: "review",
-              approvalsNeeded: 1,
-              participants: [
-                { id: randomUUID(), type: "agent", agentId: reviewerAgentId },
-              ],
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ executionPolicy }),
             },
-          ];
-
-          if (needsApproval) {
-            stages.push({
-              id: randomUUID(),
-              type: "approval",
-              approvalsNeeded: 1,
-              participants: [
-                { id: randomUUID(), type: "agent", agentId: approverAgentId },
-              ],
-            });
-          }
-
-          const executionPolicy = {
-            mode: "normal",
-            commentRequired: true,
-            stages,
-          };
-
-          try {
-            const patchRes = await apiFetch(
-              `${PAPERCLIP_API}/api/issues/${issueId}`,
+          );
+          if (patchRes.ok) {
+            ctx.logger.info(
+              "A.4: Auto-applied executionPolicy to new issue",
               {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ executionPolicy }),
-              },
-            );
-            if (patchRes.ok) {
-              ctx.logger.info(
-                "A.4: Auto-applied executionPolicy to new issue",
-                {
-                  issueId,
-                  identifier: issue?.identifier,
-                  status,
-                  reviewerAgentId,
-                  approverAgentId: needsApproval ? approverAgentId : null,
-                  companyId,
-                },
-              );
-            } else {
-              ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
                 issueId,
                 identifier: issue?.identifier,
-                status: patchRes.status,
-              });
-            }
-          } catch (err) {
-            ctx.logger.error("A.4: Error auto-applying executionPolicy", {
+                status,
+                reviewerAgentId,
+                approverAgentId,
+                companyId,
+              },
+            );
+          } else {
+            ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
               issueId,
               identifier: issue?.identifier,
-              err: String(err),
+              status: patchRes.status,
             });
           }
+        } catch (err) {
+          ctx.logger.error("A.4: Error auto-applying executionPolicy", {
+            issueId,
+            identifier: issue?.identifier,
+            err: String(err),
+          });
         }
       }
 
@@ -1743,67 +1758,11 @@ const plugin = definePlugin({
         }
       }
 
-      // -----------------------------------------------------------------------
-      // Dispatcher wakeup (Phase W-2 / AGE-691):
-      // For dispatchRequired companies, if the new issue is unassigned and in a
-      // dispatchable status, wake the dispatcher immediately so it can assign work
-      // without waiting for the next periodic heartbeat.
-      //
-      // AGE-7292: Added checkout-level dedup — skip wakeup if this issue already
-      // has an active execution lock or if a wakeup was sent recently (60s window).
-      // -----------------------------------------------------------------------
-      if (
-        isConfiguredCompany(companyId) &&
-        !!getAgentId(companyId, "dispatcher")
-      ) {
-        const issueStatus: string = (issue?.status ?? "").toLowerCase();
-        const isUnassigned = !issue?.assigneeAgentId && !issue?.assigneeUserId;
-        if (DISPATCH_WAKEUP_STATUSES.has(issueStatus) && isUnassigned) {
-          const dispatcherId = getAgentId(companyId, "dispatcher");
-          if (dispatcherId) {
-            // AGE-7292: Check dedup + execution lock before dispatching wakeup
-            const shouldWake = await shouldDispatchWakeup(
-              issueId,
-              companyId,
-              ctx,
-            );
-            if (shouldWake) {
-              try {
-                const wakeRes = await apiFetch(
-                  `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ reason: "new_unassigned_issue" }),
-                  },
-                );
-                ctx.logger.info("Dispatcher wakeup sent (issue.created)", {
-                  identifier: issue?.identifier,
-                  dispatcherId,
-                  status: wakeRes.status,
-                });
-              } catch (err) {
-                ctx.logger.error("Dispatcher wakeup failed (issue.created)", {
-                  issueId,
-                  err,
-                });
-              }
-            } else {
-              ctx.logger.info(
-                "AGE-7292: Dispatcher wakeup skipped for issue.created — dedup or active execution lock",
-                {
-                  issueId,
-                  identifier: issue?.identifier,
-                },
-              );
-            }
-          }
-        }
-      }
-
       // A.4 moved earlier in this handler (see AGE-12411). Previously here,
       // it was status-gated by the TRIGGER_STATUSES filter above, which meant
       // CLI-filed `backlog` issues never received executionPolicy.
+      // NOTE: Dispatcher wakeup (Phase W-2 / AGE-691) removed — dispatcher role
+      // is retired and no companies use it. Paperclip native heartbeat handles wakeup.
     });
 
     // -------------------------------------------------------------------------
@@ -2086,7 +2045,7 @@ const plugin = definePlugin({
                 issueId,
                 "dcw-circuit-breaker",
               );
-              if (!isDupCircuit) {
+              if (!isDupCircuit && shouldEscalateToOrchestrator(companyId, "dcw-circuit-breaker")) {
                 const orchestratorId = getAgentId(companyId, "orchestrator");
                 await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
@@ -2214,49 +2173,7 @@ const plugin = definePlugin({
                       },
                     );
 
-                    // Wake dispatcher if configured for this company
-                    // AGE-7292: Added checkout-level dedup check
-                    if (
-                      !!getAgentId(companyId, "dispatcher") &&
-                      !dep.assigneeAgentId
-                    ) {
-                      const dispatcherId = getAgentId(companyId, "dispatcher");
-                      if (dispatcherId) {
-                        const shouldWakeDep = await shouldDispatchWakeup(
-                          dep.id,
-                          companyId,
-                          ctx,
-                        );
-                        if (shouldWakeDep) {
-                          await apiFetch(
-                            `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
-                            {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                reason: `blocker_promoted_${depIdentifier}`,
-                              }),
-                            },
-                          );
-                          ctx.logger.info(
-                            "Blocker auto-promotion: woke dispatcher for promoted dependency",
-                            {
-                              dependency: depIdentifier,
-                              dispatcherId,
-                            },
-                          );
-                        } else {
-                          ctx.logger.info(
-                            "AGE-7292: Blocker auto-promotion dispatcher wakeup skipped — dedup or active execution lock",
-                            {
-                              dependency: depIdentifier,
-                              depIssueId: dep.id,
-                            },
-                          );
-                        }
-                      }
-                    }
-
+                    // NOTE: Dispatcher wakeup removed — dispatcher role retired.
                     // Post a comment on the dependency issue explaining why it was promoted
                     await apiFetch(
                       `${PAPERCLIP_API}/api/issues/${dep.id}/comments`,
@@ -3379,64 +3296,8 @@ This gate prevents false-done transitions by validating claimed work exists.
         // Paperclip heartbeat handles agent wakeup on assignment
       }
 
-      // -----------------------------------------------------------------------
-      // Dispatcher wakeup (Phase W-2 / AGE-691):
-      // For dispatchRequired companies, if an issue transitions to todo/backlog
-      // while unassigned, wake the dispatcher immediately.
-      //
-      // AGE-7292: Added checkout-level dedup — skip wakeup if this issue already
-      // has an active execution lock or if a wakeup was sent recently (60s window).
-      // -----------------------------------------------------------------------
-      if (
-        isConfiguredCompany(companyId) &&
-        !!getAgentId(companyId, "dispatcher") &&
-        DISPATCH_WAKEUP_STATUSES.has(newStatus)
-      ) {
-        try {
-          const wakeupIssue = await ctx.issues.get(issueId, companyId);
-          const isUnassigned = !wakeupIssue?.assigneeAgentId && !wakeupIssue?.assigneeUserId;
-          if (isUnassigned) {
-            const dispatcherId = getAgentId(companyId, "dispatcher");
-            if (dispatcherId) {
-              // AGE-7292: Check dedup + execution lock before dispatching wakeup
-              const shouldWake = await shouldDispatchWakeup(
-                issueId,
-                companyId,
-                ctx,
-              );
-              if (shouldWake) {
-                const wakeRes = await apiFetch(
-                  `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
-                  {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ reason: "new_unassigned_issue" }),
-                  },
-                );
-                ctx.logger.info("Dispatcher wakeup sent (issue.updated)", {
-                  issueId,
-                  dispatcherId,
-                  newStatus,
-                  status: wakeRes.status,
-                });
-              } else {
-                ctx.logger.info(
-                  "AGE-7292: Dispatcher wakeup skipped for issue.updated — dedup or active execution lock",
-                  {
-                    issueId,
-                    newStatus,
-                  },
-                );
-              }
-            }
-          }
-        } catch (err) {
-          ctx.logger.error("Dispatcher wakeup failed (issue.updated)", {
-            issueId,
-            err,
-          });
-        }
-      }
+      // NOTE: Dispatcher wakeup (Phase W-2 / AGE-691) removed — dispatcher role
+      // is retired. Paperclip native heartbeat handles agent wakeup on status change.
     });
 
     // -------------------------------------------------------------------------
@@ -3702,7 +3563,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
               issueId,
               "cold-queue-recovery",
             );
-            if (!isDupAlert) {
+            if (!isDupAlert && shouldEscalateToOrchestrator(companyId, "cold-queue-recovery")) {
               const orchestratorId = getAgentId(companyId, "orchestrator");
               await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                 method: "POST",
@@ -3958,7 +3819,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
               issueId,
               "cross-company-assignment",
             );
-            if (!isDupAlert) {
+            if (!isDupAlert && shouldEscalateToOrchestrator(issueCompanyId, "xca-circuit-breaker")) {
               const orchestratorId = getAgentId(issueCompanyId, "orchestrator");
               const agentName = [...agentCompanyMap.entries()].find(
                 ([id]) => id === assigneeAgentId,
@@ -4334,7 +4195,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
               issueId,
               "stale-execution-lock",
             );
-            if (!isDupAlert) {
+            if (!isDupAlert && shouldEscalateToOrchestrator(companyId, "stale-lock-release")) {
               const orchestratorId = getAgentId(companyId, "orchestrator");
               await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                 method: "POST",
@@ -4432,6 +4293,9 @@ This issue has been unblocked. Please review the rejection reason and revise you
     const dedupPruneInterval = setInterval(() => {
       pruneDispatchDedupTracker();
       pruneRecoveryRateTracker();
+      for (const [k, ts] of orchCompanyDedupTracker) {
+        if (Date.now() - ts >= ORCH_COMPANY_DEDUP_MS) orchCompanyDedupTracker.delete(k);
+      }
     }, 60 * 1000);
     if (dedupPruneInterval.unref) dedupPruneInterval.unref();
 
