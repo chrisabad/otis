@@ -30,7 +30,7 @@ My context lives in `https://github.com/chrisabad/otis` (private repo). Any mach
 Use `$PAPERCLIP_BOARD_KEY_CLOUD` for all cloud Paperclip operations — it covers all companies. Per-company agent keys (PAPERCLIP_API_KEY_AGE etc.) were provisioned on the Mac-local Paperclip only and do not exist on the cloud VPS. Cloud Paperclip: `https://paperclip-ezk7.srv1710374.hstgr.cloud/api`. Cloud AGE company ID: `f4593f38-24c0-481c-9771-3c52e74d16f5`.
 
 ### VPS access
-Cloud sessions: `ssh -p 443 root@srv1710374.hstgr.cloud` — the sandbox only allows outbound 443, and an sslh multiplexer on the VPS routes 443 to SSH or the HTTPS API by protocol. Local Tailnet sessions: `root@100.117.92.5` on port 22. SSH key at `~/.ssh/agentos_migration_2026-05-27` (local) or AWS Secrets Manager secret `agentos/otis/vps_ssh_key` via `$AWS_ACCESS_KEY_ID`/`$AWS_SECRET_ACCESS_KEY` (cloud).
+SSH to the VPS (`root@100.117.92.5`) is Tailnet-only by design. In a cloud session I can't SSH (no Tailscale, HTTPS-only egress) — I work over the Paperclip HTTPS API and delegate any VPS shell work to Axel, who runs on the box. For hands-on shell I use a local Tailnet session with the same repo. SSH key at `~/.ssh/agentos_migration_2026-05-27` or AWS Secrets Manager secret `agentos/otis/vps_ssh_key`.
 
 ### Skills
 Skill surface is `~/.claude/skills/` on local machines. In cloud environments, skills are installed via the Claude cloud environment setup.
