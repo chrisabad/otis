@@ -26,17 +26,29 @@ Conn: `host 127.0.0.1 port 54329 user/pass/db = paperclip`. NOTE: `interval $1` 
 
 **Run timeout.** Orchestration/impl agents (Juno/Axel/Ellis) `adapter_config.timeoutSec=600` (others default 300); legit multi-step work was hitting the 300s wall (`timed_out`).
 
+**Agent routing = OUR plugin, not native.** Per-company role routing lives in `kaleidoscope-issue-trigger`'s `/docker/paperclip-ezk7/data/plugins/kaleidoscope-issue-trigger/routing-rules.json` (host-durable). `getAgentId(companyId,role)` reads it at module load → **edits need a container restart to reload**. The deprecated `dispatcher` role funneled all work through Juno (single-concurrency) → choke. Removed fleet-wide 2026-05-30 (AGE live; FON + WEE/KAL/DIA/PIX/STM/PER/AGE-local **staged — apply on next restart**). `workflow.dispatchRequired` is vestigial (never read). AGE roles now: implementer=Orion, reviewer=Ellis, approver+orchestrator=Juno. Full code-level removal of dead dispatcher-wakeup logic → plugin PR (Axel).
+
+**Concurrency.** Implementation agents default `maxConcurrentRuns=1` (avoids concurrent VPS file/git conflicts). Axel bumped to **2** on 2026-05-30 (backlog of independent tasks + headroom: load ~0.2/2cpu, ~5.9GB free); verified no conflicts. Bump cautiously; watch for `lock`/`git`/`conflict` in stderr.
+
 ## Active Phase: AGE Phase 2 Stabilization
 
 Goal: make AGE autonomous, observable, and clean before onboarding FON. PRD at `memory/prds/2026-05-29-age-phase2-stabilization.md`.
 
-### Stabilization status (2026-05-30)
+### Stabilization status (2026-05-30, late)
 
-The "401 storm" is resolved at root. Verified-live fixes: **AGE-95** (done) — Ollama key shard + the real root cause (provider mis-routing, see runbook); **AGE-115** (cap deployed, soaking) — recovery circuit-breaker patches 056/057; **AGE-153** (Axel) — items 1 (provider=auto check) + 2 (timeout 600s) done by Otis, item 3 (comment checkout-auth 401 → adapter prompt-template needs `x-paperclip-run-id` header, new patch 058 + PR) routed to Axel.
+Fleet stable + productive: 0 failures/timeouts in recent windows, ~8 issues done/90min, no DB bloat. Verified-live fixes this session:
+- **AGE-95 (done)** — Ollama key shard + the real 401 root cause = provider mis-routing (see runbook).
+- **AGE-115 (cap deployed, soaking)** — recovery circuit-breaker patches 056/057.
+- **Dispatcher funnel removed** — AGE live, fleet staged (see runbook); work now routes to specialists in parallel, not piling on Juno.
+- **Otis terminated** from the agent roster (was `error`, no model; offboarded via `status=terminated`).
+- **Axel maxConcurrentRuns 1→2** — draining its queue 2-at-a-time, no conflicts.
 
-### Open backlog (draining autonomously via Juno→specialist routing)
-
-Query live (don't trust this list): AGE todos as of 2026-05-30 were AGE-80, 84, 88, 94, 99, 104, 121, 152 (+ AGE-85 in_review). These drain through dispatch now that the 401 root cause is fixed — do NOT hand-work the queue; monitor and unblock.
+### Open threads (for the next session)
+- **AGE-153** (Axel): item 3 = comment checkout-auth 401 (adapter prompt-template needs `x-paperclip-run-id`; new patch 058 + PR) + the `Session not found: from` `--resume` bug (item 4). Code-level dispatcher removal also lands here.
+- **AGE-155** (Axel): document cloud stabilization in agentos-docs (runbook + provider invariant).
+- **Staged routing changes** (FON + 6 others) apply on the **next container restart** — make sure a restart happens during FON standup.
+- **Monitoring does NOT auto-carry across machines** — re-run the checklist below (storm tripwire) to re-establish the watch; consider bumping Axel→3 if its queue stays deep and clean.
+- Local auto-memory (provider-inference, AGE-115 cap, routing-rules) is per-machine; the durable copies are this runbook + Paperclip issues AGE-95/115/153/155.
 
 ### Pre-existing distinct scope (not Phase 2)
 - AGE-2: Set up FON company (next phase)
