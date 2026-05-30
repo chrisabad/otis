@@ -8608,7 +8608,7 @@ This is a defense-in-depth sweep \u2014 the original bug (cold-queue recovery no
       )) {
         try {
           const dispatcherId = getAgentId(companyId, "dispatcher");
-          if (!dispatcherId) continue;
+          const agentsWokenThisSweep = /* @__PURE__ */ new Set();
           const issuesRes = await apiFetch(
             `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`
           );
@@ -8696,9 +8696,24 @@ This is a defense-in-depth sweep \u2014 the original bug (cold-queue recovery no
               skipped++;
               continue;
             }
+            const wakeTargetId = dispatcherId || assigneeAgentId;
+            if (!wakeTargetId) {
+              skipped++;
+              continue;
+            }
+            if (agentsWokenThisSweep.has(wakeTargetId)) {
+              ctx.logger.debug("Cold-queue sweep: skipping — target already woken this sweep", {
+                event: "cold_queue_skip_target_woken",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                wakeTargetId
+              });
+              skipped++;
+              continue;
+            }
             try {
               const wakeRes = await apiFetch(
-                `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
+                `${PAPERCLIP_API}/api/agents/${wakeTargetId}/wakeup`,
                 {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
@@ -8707,6 +8722,7 @@ This is a defense-in-depth sweep \u2014 the original bug (cold-queue recovery no
               );
               if (wakeRes.ok) {
                 dispatched++;
+                agentsWokenThisSweep.add(wakeTargetId);
                 existingTs.push(now);
                 coldQueueSweepTracker.set(issue.id, existingTs);
                 ctx.logger.info("Cold-queue sweep: dispatched wakeup for cold assigned issue", {
@@ -8715,23 +8731,26 @@ This is a defense-in-depth sweep \u2014 the original bug (cold-queue recovery no
                   identifier: issue.identifier,
                   assigneeAgentId,
                   agentStatus: agentStatus ?? "unknown",
-                  dispatcherId
+                  wakeTargetId,
+                  dispatcherActive: !!dispatcherId
                 });
               } else {
                 const errBody = await wakeRes.text();
-                ctx.logger.warn("Cold-queue sweep: dispatcher wakeup failed", {
+                ctx.logger.warn("Cold-queue sweep: wakeup failed", {
                   event: "cold_queue_wakeup_failed",
                   issueId: issue.id,
                   identifier: issue.identifier,
+                  wakeTargetId,
                   status: wakeRes.status,
                   body: errBody
                 });
               }
             } catch (err) {
-              ctx.logger.warn("Cold-queue sweep: error sending dispatcher wakeup", {
+              ctx.logger.warn("Cold-queue sweep: error sending wakeup", {
                 event: "cold_queue_wakeup_error",
                 issueId: issue.id,
                 identifier: issue.identifier,
+                wakeTargetId,
                 error: String(err)
               });
             }

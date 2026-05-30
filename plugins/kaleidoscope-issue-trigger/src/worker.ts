@@ -800,6 +800,19 @@ const dispatchDedupTracker = new Map<string, number>(); // issueId → last wake
 const ORCH_COMPANY_DEDUP_MS = 30 * 1000; // 30 seconds
 const orchCompanyDedupTracker = new Map<string, number>(); // `${companyId}:${alertType}` → timestamp
 
+/**
+ * Cold-queue dispatch sweep (AGE-114).
+ * Wakes agents assigned to todo/backlog issues that have gone cold.
+ * Falls back to waking the assignee directly when no dispatcher role exists
+ * (no company in routing-rules.json currently has a dispatcher role).
+ * Per-sweep dedup ensures each agent is woken at most once per sweep cycle.
+ */
+const COLD_QUEUE_SWEEP_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
+const COLD_QUEUE_DISPATCHABLE_STATUSES = new Set(["todo", "backlog"]);
+const coldQueueSweepTracker = new Map<string, number[]>(); // issueId → recent dispatch timestamps
+const COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD = 3;
+const COLD_QUEUE_CIRCUIT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+
 function shouldEscalateToOrchestrator(companyId: string, alertType: string): boolean {
   const key = companyId + ":" + alertType;
   const now = Date.now();
@@ -4232,6 +4245,166 @@ This issue has been unblocked. Please review the rejection reason and revise you
       }
     }
 
+    // ---------------------------------------------------------------------------
+    // Cold-queue dispatch sweep (AGE-114)
+    // Scans todo/backlog issues with an assignee but no active run and wakes
+    // the assignee (or dispatcher if one exists). Fixes the dead no-op where
+    // getAgentId(companyId, "dispatcher") always returned null because no
+    // company has a dispatcher role, causing the entire sweep to skip every issue.
+    // ---------------------------------------------------------------------------
+    async function sweepColdQueue() {
+      for (const [companyId] of Object.entries(routingConfig.companies)) {
+        try {
+          const dispatcherId = getAgentId(companyId, "dispatcher");
+          const agentsWokenThisSweep = new Set<string>();
+          const issuesRes = await apiFetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`,
+          );
+          if (!issuesRes.ok) continue;
+          const issues = await issuesRes.json();
+          if (!Array.isArray(issues)) continue;
+          const agentsRes = await apiFetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/agents`,
+          );
+          if (!agentsRes.ok) continue;
+          const agents = await agentsRes.json();
+          if (!Array.isArray(agents)) continue;
+          const agentStatusMap = new Map<string, string>();
+          for (const agent of agents) {
+            if (agent.id) agentStatusMap.set(agent.id, agent.status ?? "unknown");
+          }
+          let dispatched = 0;
+          let skipped = 0;
+          for (const issue of issues) {
+            const assigneeAgentId: string | null = issue.assigneeAgentId ?? null;
+            if (!assigneeAgentId) { skipped++; continue; }
+            if (!COLD_QUEUE_DISPATCHABLE_STATUSES.has((issue.status ?? "").toLowerCase())) {
+              skipped++; continue;
+            }
+            if (issue.executionRunId) {
+              ctx.logger.debug("Cold-queue sweep: skipping issue with active execution run", {
+                event: "cold_queue_skip_has_run",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                executionRunId: issue.executionRunId,
+              });
+              skipped++; continue;
+            }
+            if (issue.executionLockedAt) {
+              const lockAgeMs = Date.now() - new Date(issue.executionLockedAt).getTime();
+              if (lockAgeMs < STALE_EXECUTION_LOCK_THRESHOLD_MS) {
+                ctx.logger.debug("Cold-queue sweep: skipping issue with fresh execution lock", {
+                  event: "cold_queue_skip_fresh_lock",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  lockAgeMs,
+                });
+                skipped++; continue;
+              }
+            }
+            const shouldWake = await shouldDispatchWakeup(issue.id, companyId, ctx);
+            if (!shouldWake) {
+              ctx.logger.info("Cold-queue sweep: dedup window or lock skip", {
+                event: "cold_queue_dedup_skip",
+                issueId: issue.id,
+                identifier: issue.identifier,
+              });
+              skipped++; continue;
+            }
+            const agentStatus = agentStatusMap.get(assigneeAgentId);
+            if (agentStatus === "running") {
+              ctx.logger.debug("Cold-queue sweep: skipping — agent already running", {
+                event: "cold_queue_skip_agent_running",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                assigneeAgentId,
+                agentStatus,
+              });
+              skipped++; continue;
+            }
+            const wakeTargetId = dispatcherId ?? assigneeAgentId;
+            if (agentsWokenThisSweep.has(wakeTargetId)) {
+              ctx.logger.debug("Cold-queue sweep: skipping — target already woken this sweep", {
+                event: "cold_queue_skip_target_woken",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                wakeTargetId,
+              });
+              skipped++; continue;
+            }
+            const now = Date.now();
+            const existingTs = (coldQueueSweepTracker.get(issue.id) ?? []).filter(
+              (ts) => now - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS,
+            );
+            if (existingTs.length >= COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD) {
+              ctx.logger.warn("Cold-queue sweep: circuit breaker — skipping repeatedly dispatched issue", {
+                event: "cold_queue_circuit_breaker",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                recentAttempts: existingTs.length,
+              });
+              skipped++; continue;
+            }
+            try {
+              const wakeRes = await apiFetch(
+                `${PAPERCLIP_API}/api/agents/${wakeTargetId}/wakeup`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ reason: "cold_queue_dispatch" }),
+                },
+              );
+              if (wakeRes.ok) {
+                dispatched++;
+                agentsWokenThisSweep.add(wakeTargetId);
+                existingTs.push(now);
+                coldQueueSweepTracker.set(issue.id, existingTs);
+                ctx.logger.info("Cold-queue sweep: dispatched wakeup for cold assigned issue", {
+                  event: "cold_queue_dispatched",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  assigneeAgentId,
+                  agentStatus: agentStatus ?? "unknown",
+                  wakeTargetId,
+                  dispatcherActive: !!dispatcherId,
+                });
+              } else {
+                const errBody = await wakeRes.text();
+                ctx.logger.warn("Cold-queue sweep: wakeup failed", {
+                  event: "cold_queue_wakeup_failed",
+                  issueId: issue.id,
+                  identifier: issue.identifier,
+                  wakeTargetId,
+                  status: wakeRes.status,
+                  body: errBody,
+                });
+              }
+            } catch (err) {
+              ctx.logger.warn("Cold-queue sweep: error sending wakeup", {
+                event: "cold_queue_wakeup_error",
+                issueId: issue.id,
+                identifier: issue.identifier,
+                wakeTargetId,
+                error: String(err),
+              });
+            }
+          }
+          ctx.logger.info("Cold-queue sweep completed for company", {
+            event: "cold_queue_sweep_done",
+            companyId,
+            totalIssues: issues.length,
+            dispatched,
+            skipped,
+          });
+        } catch (err) {
+          ctx.logger.warn("Cold-queue sweep: error scanning company", {
+            companyId,
+            error: String(err),
+          });
+        }
+      }
+    }
+
     // Run initial sweep after 30s (avoid startup contention)
     const staleAgentInitial = setTimeout(() => {
       void sweepStaleAgents();
@@ -4288,6 +4461,17 @@ This issue has been unblocked. Please review the rejection reason and revise you
     }, XCA_SWEEP_INTERVAL_MS);
     if (xcaInterval.unref) xcaInterval.unref();
 
+    // Cold-queue dispatch sweep (AGE-114)
+    const coldQueueInitial = setTimeout(() => {
+      void sweepColdQueue();
+    }, 45_000);
+    if (coldQueueInitial.unref) coldQueueInitial.unref();
+
+    const coldQueueInterval = setInterval(() => {
+      void sweepColdQueue();
+    }, COLD_QUEUE_SWEEP_INTERVAL_MS);
+    if (coldQueueInterval.unref) coldQueueInterval.unref();
+
     // AGE-7292: Periodic pruning of dispatch dedup tracker to prevent memory leaks.
     // Stale entries older than DISPATCH_DEDUP_WINDOW_MS are removed every minute.
     const dedupPruneInterval = setInterval(() => {
@@ -4295,6 +4479,11 @@ This issue has been unblocked. Please review the rejection reason and revise you
       pruneRecoveryRateTracker();
       for (const [k, ts] of orchCompanyDedupTracker) {
         if (Date.now() - ts >= ORCH_COMPANY_DEDUP_MS) orchCompanyDedupTracker.delete(k);
+      }
+      for (const [issueId, timestamps] of coldQueueSweepTracker) {
+        const filtered = timestamps.filter((ts) => Date.now() - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS);
+        if (filtered.length === 0) coldQueueSweepTracker.delete(issueId);
+        else coldQueueSweepTracker.set(issueId, filtered);
       }
     }, 60 * 1000);
     if (dedupPruneInterval.unref) dedupPruneInterval.unref();
