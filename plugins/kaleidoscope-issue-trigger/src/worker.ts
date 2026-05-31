@@ -4028,6 +4028,9 @@ This issue has been unblocked. Please review the rejection reason and revise you
 
               if (stageType !== "approval" || participantId !== approverAgentId) continue;
 
+              // Skip if there's an active run — don't disturb mid-execution
+              if (full?.activeRun || full?.executionLockedAt) continue;
+
               // Two-step clear/re-assign to force wakeOnDemand
               await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                 method: "PATCH",
