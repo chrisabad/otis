@@ -812,6 +812,14 @@ const coldQueueSweepTracker = new Map<string, number[]>(); // issueId → recent
 const COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD = 3;
 const COLD_QUEUE_CIRCUIT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
 
+// Approval-wake sweep: detects in_review issues stuck at the approval stage and
+// re-assigns to the approver to trigger wakeOnDemand (the approver is often already
+// the assignee from orchestration, so no assignee-change event fires when the stage
+// advances — this sweep bridges that gap).
+const APPROVAL_WAKE_SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const APPROVAL_WAKE_DEDUP_MS = 10 * 60 * 1000; // 10 minutes — don't re-wake within this window
+const approvalWakeTracker = new Map<string, number>(); // issueId → last wake timestamp
+
 function shouldEscalateToOrchestrator(companyId: string, alertType: string): boolean {
   const key = companyId + ":" + alertType;
   const now = Date.now();
@@ -3982,6 +3990,85 @@ This issue has been unblocked. Please review the rejection reason and revise you
     }
 
 
+    // ---------------------------------------------------------------------------
+    // Approval-wake sweep
+    // Scans in_review issues and wakes the approver for any stuck at the approval
+    // stage. Uses a two-step clear/re-assign so wakeOnDemand fires even when the
+    // approver was already the assignee. Deduped per-issue with a 10-minute window.
+    // ---------------------------------------------------------------------------
+    async function sweepPendingApprovals() {
+      for (const [companyId, companyCfg] of Object.entries(routingConfig.companies)) {
+        const approverAgentId = getAgentId(companyId, "approver");
+        if (!approverAgentId) continue;
+
+        try {
+          const issuesRes = await apiFetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=in_review&limit=200`,
+          );
+          if (!issuesRes.ok) continue;
+          const issues: any[] = await issuesRes.json();
+          if (!Array.isArray(issues)) continue;
+
+          for (const issue of issues) {
+            const issueId = issue.id;
+            const identifier = issue.identifier ?? issueId;
+
+            try {
+              // Dedup: skip if woken recently
+              const lastWake = approvalWakeTracker.get(issueId) ?? 0;
+              if (Date.now() - lastWake < APPROVAL_WAKE_DEDUP_MS) continue;
+
+              // Fetch full issue to get executionState (not included in list response)
+              const fullRes = await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`);
+              if (!fullRes.ok) continue;
+              const full = await fullRes.json();
+
+              const stageType = full?.executionState?.currentStageType;
+              const participantId = full?.executionState?.currentParticipant?.agentId;
+
+              if (stageType !== "approval" || participantId !== approverAgentId) continue;
+
+              // Two-step clear/re-assign to force wakeOnDemand
+              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ assigneeAgentId: null }),
+              });
+              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ assigneeAgentId: approverAgentId }),
+              });
+
+              approvalWakeTracker.set(issueId, Date.now());
+              ctx.logger.info("Approval-wake sweep: woke approver for pending approval", {
+                issueId,
+                identifier,
+                approverAgentId,
+              });
+            } catch (err) {
+              ctx.logger.warn("Approval-wake sweep: error processing issue", {
+                issueId,
+                identifier,
+                error: String(err),
+              });
+            }
+          }
+        } catch (err) {
+          ctx.logger.warn("Approval-wake sweep: error scanning company", {
+            companyId,
+            error: String(err),
+          });
+        }
+      }
+
+      // Prune stale dedup entries
+      for (const [id, ts] of approvalWakeTracker) {
+        if (Date.now() - ts >= APPROVAL_WAKE_DEDUP_MS) approvalWakeTracker.delete(id);
+      }
+    }
+
+
     // Cold-queue recovery defense sweep (AGE-6413)
     const cqrInitial = setTimeout(() => {
       void sweepCompletedIssues();
@@ -4015,6 +4102,17 @@ This issue has been unblocked. Please review the rejection reason and revise you
     }, STALE_EXECUTION_LOCK_SWEEP_INTERVAL_MS);
     if (selInterval.unref) selInterval.unref();
 
+
+    // Approval-wake sweep
+    const approvalWakeInitial = setTimeout(() => {
+      void sweepPendingApprovals();
+    }, 120_000);
+    if (approvalWakeInitial.unref) approvalWakeInitial.unref();
+
+    const approvalWakeInterval = setInterval(() => {
+      void sweepPendingApprovals();
+    }, APPROVAL_WAKE_SWEEP_INTERVAL_MS);
+    if (approvalWakeInterval.unref) approvalWakeInterval.unref();
 
     // Cold-queue dispatch sweep (AGE-114)
     const coldQueueInitial = setTimeout(() => {
