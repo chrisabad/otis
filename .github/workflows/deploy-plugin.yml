@@ -9,6 +9,7 @@ on:
       - "plugins/kaleidoscope-issue-trigger/paperclip.manifest.json"
       - "plugins/kaleidoscope-issue-trigger/package.json"
       - "plugins/kaleidoscope-issue-trigger/esbuild.config.mjs"
+      - "plugins/kaleidoscope-issue-trigger/package-lock.json"
       - ".github/workflows/deploy-plugin.yml"
   workflow_dispatch:
     inputs:
