@@ -16,7 +16,9 @@
     "issues.read",
     "issues.write",
     "comments.write",
-    "agents.manage"
+    "agents.manage",
+    "labels.write",
+    "approvals.write"
   ],
   "instanceConfigSchema": {
     "type": "object",
