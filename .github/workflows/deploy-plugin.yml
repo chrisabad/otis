@@ -10,6 +10,7 @@ on:
       - "plugins/kaleidoscope-issue-trigger/package.json"
       - "plugins/kaleidoscope-issue-trigger/esbuild.config.mjs"
       - "plugins/kaleidoscope-issue-trigger/package-lock.json"
+      - "agents/**"
       - ".github/workflows/deploy-plugin.yml"
   workflow_dispatch:
     inputs:
@@ -72,6 +73,17 @@ jobs:
             -o StrictHostKeyChecking=no \
             "${VPS_USER}@${VPS_HOST}" \
             "touch ${VPS_PATH} && echo 'Plugin reloaded'"
+
+          # Deploy agent instruction bundles
+          for agent in juno axel orion ellis quinn vera dex; do
+            DEST="/docker/paperclip-ezk7/data/agent-instructions/${agent}/AGENTS.md"
+            ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no "${VPS_USER}@${VPS_HOST}" \
+              "mkdir -p /docker/paperclip-ezk7/data/agent-instructions/${agent}"
+            scp -i /tmp/deploy_key -o StrictHostKeyChecking=no \
+              "$GITHUB_WORKSPACE/agents/${agent}/AGENTS.md" \
+              "${VPS_USER}@${VPS_HOST}:${DEST}"
+            echo "Deployed instructions for ${agent}"
+          done
 
           rm /tmp/deploy_key
 
