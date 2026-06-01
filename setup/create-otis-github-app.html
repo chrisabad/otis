@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Create Otis GitHub App</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      max-width: 560px;
+      margin: 80px auto;
+      padding: 0 24px;
+      color: #1f2328;
+    }
+    h1 { font-size: 24px; margin-bottom: 8px; }
+    p { color: #57606a; line-height: 1.5; }
+    .permissions {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      padding: 16px 20px;
+      margin: 20px 0;
+      font-size: 14px;
+    }
+    .permissions h3 { margin: 0 0 10px; font-size: 14px; color: #1f2328; }
+    .permissions ul { margin: 0; padding-left: 20px; color: #57606a; line-height: 1.8; }
+    button {
+      background: #1f883d;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      width: 100%;
+    }
+    button:hover { background: #1a7f37; }
+    .after {
+      margin-top: 20px;
+      font-size: 13px;
+      color: #57606a;
+      border-top: 1px solid #d0d7de;
+      padding-top: 16px;
+    }
+    .after ol { padding-left: 20px; line-height: 2; }
+    code {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Create Otis GitHub App</h1>
+  <p>One-click registration for the Otis AGE agent GitHub App. GitHub will pre-fill the app settings from this manifest.</p>
+
+  <div class="permissions">
+    <h3>Permissions this app will request</h3>
+    <ul>
+      <li><strong>Contents</strong> — read &amp; write (commit files, push branches)</li>
+      <li><strong>Pull requests</strong> — read &amp; write (open and update PRs)</li>
+      <li><strong>Issues</strong> — read &amp; write (create and comment on issues)</li>
+      <li><strong>Workflows</strong> — read &amp; write (update GitHub Actions files)</li>
+      <li><strong>Metadata</strong> — read (required by GitHub)</li>
+    </ul>
+  </div>
+
+  <form action="https://github.com/settings/apps/new" method="post">
+    <input type="hidden" name="manifest" id="manifest">
+    <input type="hidden" name="state" value="otis-age">
+    <button type="submit">Create Otis App on GitHub →</button>
+  </form>
+
+  <div class="after">
+    <strong>After GitHub creates the app:</strong>
+    <ol>
+      <li>Note the <strong>App ID</strong> shown on the app settings page</li>
+      <li>Scroll down and click <strong>Generate a private key</strong> — save the <code>.pem</code> file</li>
+      <li>Click <strong>Install App</strong> → install on <code>chrisabad/otis</code> and any other repos Otis needs</li>
+      <li>Note the <strong>Installation ID</strong> from the install URL (<code>/installations/&lt;id&gt;</code>)</li>
+      <li>Store App ID, Installation ID, and private key in AWS Secrets Manager as <code>agentos/otis/github_app</code></li>
+    </ol>
+  </div>
+
+  <script>
+    const CALLBACK = "http://localhost:8765/agentos-app-callback?slug=otis-age";
+    const manifest = {
+      name: "Otis (AGE)",
+      url: "https://github.com/chrisabad/otis",
+      description: "Otis — COO agent for the AgentOS fleet. Manages skills, opens PRs, and files issues across AGE repos.",
+      redirect_url: CALLBACK,
+      callback_urls: [CALLBACK],
+      public: false,
+      default_permissions: {
+        contents: "write",
+        pull_requests: "write",
+        issues: "write",
+        metadata: "read"
+      },
+      default_events: []
+    };
+    document.getElementById("manifest").value = JSON.stringify(manifest);
+  </script>
+</body>
+</html>
