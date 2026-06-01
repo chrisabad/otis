@@ -1,17 +1,42 @@
-// Source recovered from dist/worker.js.map on 2026-05-30 and updated with all fixes.
-// This file IS the authoritative source. dist/worker.js must be rebuilt from this source.
-// Build: npm install && npm run build  (esbuild, see package.json)
-// Deploy: scp dist/worker.js root@100.117.92.5:/docker/paperclip-ezk7/data/plugins/kaleidoscope-issue-trigger/dist/worker.js
-//
-// Fixes applied 2026-05-30 (also reflected in dist/worker.js on VPS):
-//   - A.4: !issue.executionPolicy → !issue.executionPolicy?.stages?.length
-//   - Prefix detection (isGateIssue/needsApproval) removed; approval always applies
-//   - Orchestrator wakeup dedup: shouldEscalateToOrchestrator() 30s per-company window
-//   - Dispatcher dead code removed (3 wakeup blocks retired with dispatcher role)
-//   - Manifest capabilities updated (issues.write, comments.write, agents.manage)
-
 /**
- * Issue Trigger Plugin — v1.44.0
+ * Issue Trigger Plugin — v1.45.0
+ *
+ * Changed in v1.45.0 (AGE-14116 — universal plan gate):
+ * - Replaced per-company `planRequired` routing flag with a universal gate:
+ *   ALL top-level issues (no parentId) created or updated to `todo` are
+ *   auto-demoted to `backlog` unless they have an approved plan (native plan
+ *   document + accepted request_confirmation) or pending CEO review.
+ * - Removed all creator-based exemptions: board-created, Juno-created,
+ *   Dispatch promotion, and legacy "Plan approved" comment exemptions are gone.
+ * - Only the `parentId` check bypasses the gate (child issues skip it entirely).
+ * - Removed `getWorkflowFlag()` function (no longer needed; planRequired was the
+ *   only consumer).
+ * - CEO plan-review routing and native plan-approval (AGE-12953/AGE-12754)
+ *   preserved unchanged.
+ *
+ * Added in v1.44.0 (AGE-12953 — CEO plan-review routing):
+ * - When a planRequired issue has a pending `request_confirmation` matching the
+ *   latest plan revision, the plugin now automatically reassigns the issue to the
+ *   company CEO agent (looked up via GET /api/companies/:companyId/agents, role=ceo)
+ *   and returns without demoting. This wakes the CEO for autonomous plan review.
+ * - When the confirmation is accepted and the CEO is the current assignee, the
+ *   plugin restores the original implementer (createdByAgentId from the accepted
+ *   interaction) so they can continue.
+ * - When the confirmation is declined and the CEO is the current assignee, the
+ *   plugin restores the original implementer and posts a rejection comment; the
+ *   plan-first gate then demotes the issue to backlog so the implementer revises.
+ * - This logic runs in both the issue.created and issue.updated planRequired blocks.
+ * - New helpers: getCeoAgentId(companyId), getPlanConfirmationState(issueId).
+ *
+ * Added in v1.43.0 (AGE-12754 native plan-approval primitive):
+ * - Plan-first gate now recognizes Paperclip's native plan-approval flow as an
+ *   exemption: an issue is exempt from backlog→todo demotion when it has a `plan`
+ *   keyed document AND an accepted `request_confirmation` interaction whose
+ *   `idempotencyKey` matches `confirmation:{issueId}:plan:{latestRevisionId}`.
+ * - The legacy "Plan approved" comment fallback is preserved for dual-support during
+ *   planner-skill migration. Each legacy acceptance now emits a warn-level telemetry
+ *   line (`legacyAcceptance: true`) so we can confirm the path is quiet before removal.
+ * - Both gate locations (issue.created and issue.updated) call the same helper.
  *
  * Added in v1.42.0 (AGE-11747 sweep clears execution fields on PASS):
  * - sweepStrandedReviewerVerdicts now clears executionRunId, executionLockedAt,
@@ -389,27 +414,21 @@
 import { execSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
 
-const PAPERCLIP_API =
-  process.env.PAPERCLIP_API_URL?.replace(/\/api$/, "") ??
-  "http://127.0.0.1:3100";
-let PLUGIN_API_KEY = process.env.PAPERCLIP_BOARD_KEY ?? "";
+const GATEWAY_WS = "ws://127.0.0.1:18790";
+const PAPERCLIP_API = "http://127.0.0.1:3101";
+const AGENTS_DIR = "/Users/openclaw/.openclaw/workspace/agents";
+const OPENCLAW_CONFIG = "/Users/openclaw/.openclaw/openclaw.json";
+// AGE-221: Use import.meta.url-relative path so the compiled worker.js resolves
+// routing-rules.json relative to its own location regardless of where it's deployed.
 const ROUTING_RULES_PATH = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
   "routing-rules.json",
 );
-
-function apiFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string> ?? {}),
-  };
-  if (PLUGIN_API_KEY) headers["Authorization"] = `Bearer ${PLUGIN_API_KEY}`;
-  return fetch(url, { ...options, headers });
-}
 
 // Phase 4.5: Load routing rules config for per-company workflow variant support.
 // If the file is missing or malformed, all workflow flags return false → no routing rules fire.
@@ -450,7 +469,7 @@ async function ensureBlockerLabel(
 ): Promise<string | null> {
   // Try to create the label. If it already exists, we'll get an error — that's fine.
   try {
-    const res = await apiFetch(
+    const res = await fetch(
       `${PAPERCLIP_API}/api/companies/${companyId}/labels`,
       {
         method: "POST",
@@ -477,7 +496,7 @@ async function getLabelId(
   labelName: string,
 ): Promise<string | null> {
   try {
-    const res = await apiFetch(
+    const res = await fetch(
       `${PAPERCLIP_API}/api/companies/${companyId}/labels`,
     );
     if (!res.ok) return null;
@@ -502,7 +521,7 @@ async function getLabelIds(
 ): Promise<string[]> {
   if (labelNames.length === 0) return [];
   try {
-    const res = await apiFetch(
+    const res = await fetch(
       `${PAPERCLIP_API}/api/companies/${companyId}/labels`,
     );
     if (!res.ok) return [];
@@ -674,6 +693,16 @@ function buildApprovalComment(issue: any): string {
 
 const DISPATCH_WAKEUP_STATUSES = new Set(["todo", "backlog"]);
 
+/**
+ * AGE-5123: Retry storm breaker thresholds.
+ * When Paperclip auto-continuation retries a blocked transition repeatedly
+ * (no blocker label), each retry creates an AGE-278 rejection comment.
+ * After STORM_THRESHOLD rejections within STORM_WINDOW_MS, we auto-apply
+ * blocked:external and allow the transition to break the loop.
+ */
+const STORM_THRESHOLD = 3; // Number of AGE-278 rejections before breaking the loop
+const STORM_WINDOW_MS = 60 * 60 * 1000; // 1 hour rolling window
+const STORM_COMMENT_MATCH = "**AGE-278: Blocker Label Validation**"; // Comment prefix to detect rejections;
 
 /**
  * AGE-5261: Alert dedup window for blocked:external comments.
@@ -685,16 +714,20 @@ const ALERT_DEDUP_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ALERT_DEDUP_SHORT_WINDOW_MS = 60 * 1000; // 60 seconds — fast-path dedup for event amplification (Bug: 16-36 duplicate handler invocations)
 const ALERT_DEDUP_COMMENT_TYPES = [
   "blocked-external", // Generic blocked:external alert
+  "storm-breaker", // Retry storm breaker (AGE-5123)
   "circuit-breaker", // QA rejection circuit breaker (AGE-318)
   "approval-gatekeeper", // Approval label enforcement
   "approval-quality", // Approval quality gate
   "continuation-requeue", // Continuation-requeue early detection (AGE-5447)
   "dcw-circuit-breaker", // deferred_comment_wake circuit breaker (AGE-6126)
+  "plan-first-demotion", // Plan-first auto-demotion (AGE-6229)
   "cold-queue-recovery", // Cold-queue recovery suppression (AGE-6413)
   "reviewer-close-recovery", // Reviewer close recovery sweep (AGE-6132)
+  "age278-rejection", // AGE-278 blocker label validation rejection (AGE-6654)
   "system-timeout", // Paperclip system timeout auto-block
   "verdict-dedup", // Verdict dedup flag (AGE-6132/AGE-7277)
   "stale-execution-lock", // Stale execution lock auto-release (AGE-7276)
+  "cross-company-assignment", // Cross-company agent assignment guard (AGE-7010)
   "review-gate", // Review gate interception (AGE-7550)
   "rate-limit", // Agent issue-creation rate limit (AGE-8523)
   "checkout-dedup", // Checkout-level dispatch dedup (AGE-7292)
@@ -731,6 +764,15 @@ const CQR_SWEEP_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const CQR_CIRCUIT_BREAKER_THRESHOLD = 3; // Reverts within window before escalating
 const CQR_CIRCUIT_WINDOW_MS = 30 * 60 * 1000; // 30-minute sliding window
 const cqrSuppressionTracker = new Map<string, number[]>();
+
+/**
+ * AGE-216 workaround: Issue onboarding sweep.
+ * Paperclip host does not deliver reactive events (issue.created) to plugin workers.
+ * This sweep runs every 5 minutes and applies the two operations that issue.created
+ * was responsible for: A.4 executionPolicy auto-apply and universal plan-first gate.
+ * Both operations are idempotent and safe to run on already-processed issues.
+ */
+const ONBOARDING_SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * AGE-6132: Reviewer close recovery sweep constants.
@@ -790,46 +832,6 @@ const DISPATCH_DEDUP_WINDOW_MS = 60 * 1000; // 60 seconds — skip redundant wak
 const dispatchDedupTracker = new Map<string, number>(); // issueId → last wakeup timestamp
 
 /**
- * Per-company orchestrator escalation dedup.
- * When multiple issues hit circuit breakers simultaneously (e.g., on container restart),
- * each would normally post an alert comment that wakes the orchestrator. This tracker
- * limits escalation to once per company per alert type per 30 seconds, preventing
- * burst storms where N simultaneous circuit breakers generate N simultaneous wakeups.
- */
-const ORCH_COMPANY_DEDUP_MS = 30 * 1000; // 30 seconds
-const orchCompanyDedupTracker = new Map<string, number>(); // `${companyId}:${alertType}` → timestamp
-
-/**
- * Cold-queue dispatch sweep (AGE-114).
- * Wakes agents assigned to todo/backlog issues that have gone cold.
- * Falls back to waking the assignee directly when no dispatcher role exists
- * (no company in routing-rules.json currently has a dispatcher role).
- * Per-sweep dedup ensures each agent is woken at most once per sweep cycle.
- */
-const COLD_QUEUE_SWEEP_INTERVAL_MS = 3 * 60 * 1000; // 3 minutes
-const COLD_QUEUE_DISPATCHABLE_STATUSES = new Set(["todo", "backlog"]);
-const coldQueueSweepTracker = new Map<string, number[]>(); // issueId → recent dispatch timestamps
-const COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD = 3;
-const COLD_QUEUE_CIRCUIT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
-
-// Approval-wake sweep: detects in_review issues stuck at the approval stage and
-// re-assigns to the approver to trigger wakeOnDemand (the approver is often already
-// the assignee from orchestration, so no assignee-change event fires when the stage
-// advances — this sweep bridges that gap).
-const APPROVAL_WAKE_SWEEP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const APPROVAL_WAKE_DEDUP_MS = 10 * 60 * 1000; // 10 minutes — don't re-wake within this window
-const approvalWakeTracker = new Map<string, number>(); // issueId → last wake timestamp
-
-function shouldEscalateToOrchestrator(companyId: string, alertType: string): boolean {
-  const key = companyId + ":" + alertType;
-  const now = Date.now();
-  const last = orchCompanyDedupTracker.get(key);
-  if (last !== undefined && now - last < ORCH_COMPANY_DEDUP_MS) return false;
-  orchCompanyDedupTracker.set(key, now);
-  return true;
-}
-
-/**
  * AGE-8523: Agent issue-creation rate limit constants.
  * Limits the number of issues an agent can create per hour to prevent
  * runaway cascades (e.g., 864 "Recover stalled issue" chain during a
@@ -871,6 +873,8 @@ const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour sliding window
  */
 const RATE_LIMIT_EXEMPT_AGENT_IDS: string[] = [
   // Healthd agent — reports real system failures, must not be rate-limited
+  // Otis (COO) — interactive-session only, never runs autonomous loops that could storm
+  "2b5f4e67-ca9a-44a2-ac1b-9ec5816d09e8",
 ];
 
 /**
@@ -1027,7 +1031,7 @@ async function isDuplicateAlertComment(
   alertCommentInflight.add(inflightKey);
 
   try {
-    const commentsRes = await apiFetch(
+    const commentsRes = await fetch(
       `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
     );
     if (!commentsRes.ok) return false;
@@ -1090,23 +1094,207 @@ function releaseAlertCommentInflight(
   alertCommentInflight.delete(`${issueId}:${commentType}`);
 }
 
+/**
+ * AGE-12754: Native plan-approval gate predicate.
+ *
+ * Returns true when the issue has a `plan` keyed document AND an accepted
+ * `request_confirmation` interaction whose idempotencyKey is bound to the
+ * current plan revision (`confirmation:{issueId}:plan:{latestRevisionId}`).
+ *
+ * The revision binding is what makes plan re-edits invalidate stale approvals:
+ * a fresh PUT bumps `latestRevisionId`, so the stored interaction's key no
+ * longer matches and the gate falls open until a fresh `request_confirmation`
+ * is accepted against the new revision.
+ *
+ * Returns false on any fetch error so the caller falls through to the legacy
+ * exemptions during dual-support — a transient API blip should not bypass the
+ * gate, but it should also not promote a demotion that another check would
+ * have exempted.
+ */
+async function checkNativePlanApproval(
+  ctx: {
+    logger: {
+      info: (msg: string, meta?: Record<string, unknown>) => void;
+      warn: (msg: string, meta?: Record<string, unknown>) => void;
+    };
+  },
+  issueId: string,
+  identifier: string | null | undefined,
+): Promise<boolean> {
+  try {
+    const issueRes = await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`);
+    if (!issueRes.ok) return false;
+    const fullIssue = (await issueRes.json()) as {
+      planDocument?: { latestRevisionId?: string } | null;
+    };
+    const latestRevisionId = fullIssue?.planDocument?.latestRevisionId;
+    if (!latestRevisionId) return false;
+
+    const interactionsRes = await fetch(
+      `${PAPERCLIP_API}/api/issues/${issueId}/interactions`,
+    );
+    if (!interactionsRes.ok) return false;
+    const interactions = (await interactionsRes.json()) as Array<{
+      kind?: string;
+      idempotencyKey?: string;
+      status?: string;
+    }>;
+    if (!Array.isArray(interactions)) return false;
+
+    const expectedKey = `confirmation:${issueId}:plan:${latestRevisionId}`;
+    const accepted = interactions.find(
+      (i) =>
+        i?.kind === "request_confirmation" &&
+        i?.idempotencyKey === expectedKey &&
+        i?.status === "accepted",
+    );
+    if (accepted) {
+      ctx.logger.info(
+        "Plan-first: native plan-approval exemption — accepted request_confirmation matches latest plan revision",
+        { issueId, identifier, revisionId: latestRevisionId },
+      );
+      return true;
+    }
+    return false;
+  } catch (err) {
+    ctx.logger.warn(
+      "Plan-first: native plan-approval check failed; falling through to legacy exemptions",
+      { issueId, identifier, err },
+    );
+    return false;
+  }
+}
+
+/**
+ * AGE-12953: Looks up the CEO agent for a company via the Paperclip agents API.
+ * Returns the agent ID, or null if the company has no CEO agent or the API call fails.
+ */
+async function getCeoAgentId(companyId: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${PAPERCLIP_API}/api/companies/${companyId}/agents`,
+    );
+    if (!res.ok) return null;
+    const agents = (await res.json()) as Array<{ id: string; role: string }>;
+    if (!Array.isArray(agents)) return null;
+    return agents.find((a) => a.role === "ceo")?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * AGE-12953: Fetches the plan confirmation state for an issue.
+ *
+ * Fetches the full issue (to get latestRevisionId) and the interactions list in
+ * parallel, then checks for a `request_confirmation` interaction whose
+ * idempotencyKey matches `confirmation:<issueId>:plan:<latestRevisionId>`.
+ *
+ * Returns:
+ *   {
+ *     latestRevisionId: string | null,
+ *     pending: { interactionId: string; createdByAgentId: string | null } | null,
+ *     accepted: { interactionId: string; createdByAgentId: string | null } | null,
+ *     declined: { interactionId: string; createdByAgentId: string | null; reason: string | null } | null,
+ *   }
+ *
+ * Returns null for all fields on any fetch error.
+ */
+async function getPlanConfirmationState(issueId: string): Promise<{
+  latestRevisionId: string | null;
+  pending: { interactionId: string; createdByAgentId: string | null } | null;
+  accepted: { interactionId: string; createdByAgentId: string | null } | null;
+  declined: {
+    interactionId: string;
+    createdByAgentId: string | null;
+    reason: string | null;
+  } | null;
+}> {
+  const nullResult = {
+    latestRevisionId: null,
+    pending: null,
+    accepted: null,
+    declined: null,
+  };
+  try {
+    const [issueRes, interactionsRes] = await Promise.all([
+      fetch(`${PAPERCLIP_API}/api/issues/${issueId}`),
+      fetch(`${PAPERCLIP_API}/api/issues/${issueId}/interactions`),
+    ]);
+    if (!issueRes.ok || !interactionsRes.ok) return nullResult;
+
+    const fullIssue = (await issueRes.json()) as {
+      planDocument?: { latestRevisionId?: string } | null;
+    };
+    const latestRevisionId = fullIssue?.planDocument?.latestRevisionId ?? null;
+    if (!latestRevisionId) return nullResult;
+
+    const interactions = (await interactionsRes.json()) as Array<{
+      id?: string;
+      kind?: string;
+      idempotencyKey?: string;
+      status?: string;
+      createdByAgentId?: string | null;
+      result?: { outcome?: string; reason?: string } | null;
+    }>;
+    if (!Array.isArray(interactions))
+      return {
+        latestRevisionId,
+        pending: null,
+        accepted: null,
+        declined: null,
+      };
+
+    const expectedKey = `confirmation:${issueId}:plan:${latestRevisionId}`;
+
+    const pendingInteraction = interactions.find(
+      (i) =>
+        i?.kind === "request_confirmation" &&
+        i?.idempotencyKey === expectedKey &&
+        i?.status === "pending",
+    );
+    const acceptedInteraction = interactions.find(
+      (i) =>
+        i?.kind === "request_confirmation" &&
+        i?.idempotencyKey === expectedKey &&
+        i?.status === "accepted",
+    );
+    const declinedInteraction = interactions.find(
+      (i) =>
+        i?.kind === "request_confirmation" &&
+        i?.idempotencyKey === expectedKey &&
+        i?.status === "declined",
+    );
+
+    return {
+      latestRevisionId,
+      pending: pendingInteraction
+        ? {
+            interactionId: pendingInteraction.id ?? "",
+            createdByAgentId: pendingInteraction.createdByAgentId ?? null,
+          }
+        : null,
+      accepted: acceptedInteraction
+        ? {
+            interactionId: acceptedInteraction.id ?? "",
+            createdByAgentId: acceptedInteraction.createdByAgentId ?? null,
+          }
+        : null,
+      declined: declinedInteraction
+        ? {
+            interactionId: declinedInteraction.id ?? "",
+            createdByAgentId: declinedInteraction.createdByAgentId ?? null,
+            reason: declinedInteraction.result?.reason ?? null,
+          }
+        : null,
+    };
+  } catch {
+    return nullResult;
+  }
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
-    // Load board API key from plugin config (set by operator via admin UI)
-    try {
-      const config = await ctx.config.get();
-      if (config.apiKey && typeof config.apiKey === "string") {
-        PLUGIN_API_KEY = config.apiKey;
-        ctx.logger.info("Issue Trigger: board API key loaded from config");
-      } else if (!PLUGIN_API_KEY) {
-        ctx.logger.warn(
-          "Issue Trigger: no apiKey in plugin config and PAPERCLIP_BOARD_KEY env not set — API calls will be unauthenticated",
-        );
-      }
-    } catch {
-      ctx.logger.warn("Issue Trigger: failed to read plugin config — falling back to env");
-    }
-
     // Log configured companies at startup (AGE-302 acceptance criterion)
     const configuredCompanies = Object.entries(routingConfig.companies).map(
       ([id, cfg]) => `${cfg.name ?? id} (${id})`,
@@ -1179,7 +1367,7 @@ const plugin = definePlugin({
           for (let i = 0; i < 10 && currentId && !visited.has(currentId); i++) {
             visited.add(currentId);
             try {
-              const parentRes = await apiFetch(
+              const parentRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${currentId}`,
               );
               if (!parentRes.ok) break;
@@ -1240,7 +1428,7 @@ const plugin = definePlugin({
             ];
           }
           // Post a cascade comment for observability
-          await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+          await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -1248,7 +1436,7 @@ const plugin = definePlugin({
             }),
           });
         }
-        await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+        await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(patchBody),
@@ -1277,7 +1465,7 @@ const plugin = definePlugin({
       ) {
         try {
           // Fetch all issues created by this agent in the last hour
-          const agentIssuesRes = await apiFetch(
+          const agentIssuesRes = await fetch(
             `${PAPERCLIP_API}/api/companies/${companyId}/issues?createdByAgentId=${createdByAgentId}&limit=50&sortBy=createdAt&sortOrder=desc`,
           );
           if (agentIssuesRes.ok) {
@@ -1333,7 +1521,7 @@ const plugin = definePlugin({
               );
 
               // Cancel the issue
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ status: "cancelled" }),
@@ -1345,7 +1533,7 @@ const plugin = definePlugin({
                 "rate-limit",
               );
               if (!isDupRateLimit) {
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -1403,121 +1591,6 @@ const plugin = definePlugin({
       const status: string = (issue?.status ?? "").toLowerCase();
 
       // -----------------------------------------------------------------------
-      // Auto-assign unassigned issues on creation (AGE routing hook).
-      // Priority: project leadAgentId → company implementer from routing-rules.json.
-      // When an unassigned backlog issue is assigned here, promote it to todo so
-      // Paperclip's native heartbeat can wake the agent immediately.
-      // -----------------------------------------------------------------------
-      if (
-        !issue.assigneeAgentId &&
-        !issue.assigneeUserId &&
-        status !== "done" &&
-        status !== "cancelled" &&
-        isConfiguredCompany(companyId)
-      ) {
-        let targetAgentId: string | null = null;
-        let assignmentSource = "";
-
-        // Agents that only work interactively — never auto-assign to them.
-        const AUTO_ASSIGN_EXCLUDED_AGENT_IDS = [
-          "2b5f4e67-ca9a-44a2-ac1b-9ec5816d09e8", // Otis (COO — interactive only)
-        ];
-
-        // Priority 1: project lead (skip if excluded)
-        if (issue.projectId) {
-          try {
-            const projRes = await apiFetch(
-              `${PAPERCLIP_API}/api/projects/${issue.projectId}`,
-            );
-            if (projRes.ok) {
-              const proj = await projRes.json();
-              if (proj?.leadAgentId && !AUTO_ASSIGN_EXCLUDED_AGENT_IDS.includes(proj.leadAgentId)) {
-                targetAgentId = proj.leadAgentId;
-                assignmentSource = "project-lead";
-              }
-            }
-          } catch {
-            // fail-open: fall through to company implementer
-          }
-        }
-
-        // Priority 2: company implementer from routing-rules.json
-        if (!targetAgentId) {
-          const implementerId = getAgentId(companyId, "implementer");
-          if (implementerId) {
-            targetAgentId = implementerId;
-            assignmentSource = "company-implementer";
-          }
-        }
-
-        if (targetAgentId) {
-          const patchBody: Record<string, unknown> = { assigneeAgentId: targetAgentId };
-          if (status === "backlog") patchBody.status = "todo";
-          try {
-            const patchRes = await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(patchBody),
-            });
-            if (patchRes.ok) {
-              ctx.logger.info("Auto-assign: assigned unassigned issue on creation", {
-                issueId,
-                identifier: issue?.identifier,
-                targetAgentId,
-                assignmentSource,
-                promoted: status === "backlog",
-              });
-              // Update local copy so downstream handlers see the assignment
-              issue = { ...issue, assigneeAgentId: targetAgentId, ...(status === "backlog" ? { status: "todo" } : {}) };
-            } else {
-              ctx.logger.error("Auto-assign: PATCH failed", {
-                issueId,
-                identifier: issue?.identifier,
-                httpStatus: patchRes.status,
-              });
-            }
-          } catch (err) {
-            ctx.logger.error("Auto-assign: error patching issue", {
-              issueId,
-              identifier: issue?.identifier,
-              err: String(err),
-            });
-          }
-        }
-      }
-
-      // -----------------------------------------------------------------------
-      // Set workMode:planning on new parent tasks so agents plan before acting.
-      // Sub-tasks are excluded — they inherit scope from their parent and we
-      // don't want planning mode to trigger another round of sub-task creation.
-      // -----------------------------------------------------------------------
-      if (
-        !issue.parentId &&
-        status !== "done" &&
-        status !== "cancelled" &&
-        isConfiguredCompany(companyId) &&
-        issue.workMode !== "planning"
-      ) {
-        try {
-          await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ workMode: "planning" }),
-          });
-          ctx.logger.info("Set workMode:planning on new parent issue", {
-            issueId,
-            identifier: issue?.identifier,
-          });
-        } catch (err) {
-          ctx.logger.error("Failed to set workMode:planning", {
-            issueId,
-            identifier: issue?.identifier,
-            err: String(err),
-          });
-        }
-      }
-
-      // -----------------------------------------------------------------------
       // A.4 [moved here for AGE-12411]: Auto-apply executionPolicy to new issues
       // BEFORE the TRIGGER_STATUSES early-return. Previously A.4 only ran for
       // todo/triage/unstarted issues, which meant CLI-filed `backlog` issues
@@ -1536,73 +1609,77 @@ const plugin = definePlugin({
         status !== "cancelled" &&
         isConfiguredCompany(companyId) &&
         getAgentId(companyId, "reviewer") !== null &&
-        !issue.executionPolicy?.stages?.length
+        !issue.executionPolicy
       ) {
         const reviewerAgentId = getAgentId(companyId, "reviewer") as string;
         const approverAgentId = getAgentId(companyId, "approver");
+        const isGateIssue = /^\[gate\]/i.test(issueTitle);
+        const needsApproval = approverAgentId !== null;
 
-        const stages: object[] = [
-          {
-            id: randomUUID(),
-            type: "review",
-            approvalsNeeded: 1,
-            participants: [
-              { id: randomUUID(), type: "agent", agentId: reviewerAgentId },
-            ],
-          },
-        ];
-
-        if (approverAgentId !== null) {
-          stages.push({
-            id: randomUUID(),
-            type: "approval",
-            approvalsNeeded: 1,
-            participants: [
-              { id: randomUUID(), type: "agent", agentId: approverAgentId },
-            ],
-          });
-        }
-
-        const executionPolicy = {
-          mode: "normal",
-          commentRequired: true,
-          stages,
-        };
-
-        try {
-          const patchRes = await apiFetch(
-            `${PAPERCLIP_API}/api/issues/${issueId}`,
+        if (!isGateIssue) {
+          const stages: object[] = [
             {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ executionPolicy }),
+              id: randomUUID(),
+              type: "review",
+              approvalsNeeded: 1,
+              participants: [
+                { id: randomUUID(), type: "agent", agentId: reviewerAgentId },
+              ],
             },
-          );
-          if (patchRes.ok) {
-            ctx.logger.info(
-              "A.4: Auto-applied executionPolicy to new issue",
-              {
-                issueId,
-                identifier: issue?.identifier,
-                status,
-                reviewerAgentId,
-                approverAgentId,
-                companyId,
-              },
-            );
-          } else {
-            ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
-              issueId,
-              identifier: issue?.identifier,
-              status: patchRes.status,
+          ];
+
+          if (needsApproval) {
+            stages.push({
+              id: randomUUID(),
+              type: "approval",
+              approvalsNeeded: 1,
+              participants: [
+                { id: randomUUID(), type: "agent", agentId: approverAgentId },
+              ],
             });
           }
-        } catch (err) {
-          ctx.logger.error("A.4: Error auto-applying executionPolicy", {
-            issueId,
-            identifier: issue?.identifier,
-            err: String(err),
-          });
+
+          const executionPolicy = {
+            mode: "normal",
+            commentRequired: true,
+            stages,
+          };
+
+          try {
+            const patchRes = await fetch(
+              `${PAPERCLIP_API}/api/issues/${issueId}`,
+              {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ executionPolicy }),
+              },
+            );
+            if (patchRes.ok) {
+              ctx.logger.info(
+                "A.4: Auto-applied executionPolicy to new issue",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  status,
+                  reviewerAgentId,
+                  approverAgentId: needsApproval ? approverAgentId : null,
+                  companyId,
+                },
+              );
+            } else {
+              ctx.logger.error("A.4: Failed to auto-apply executionPolicy", {
+                issueId,
+                identifier: issue?.identifier,
+                status: patchRes.status,
+              });
+            }
+          } catch (err) {
+            ctx.logger.error("A.4: Error auto-applying executionPolicy", {
+              issueId,
+              identifier: issue?.identifier,
+              err: String(err),
+            });
+          }
         }
       }
 
@@ -1614,12 +1691,398 @@ const plugin = definePlugin({
         companyId,
       });
 
+      // -----------------------------------------------------------------------
+      // Universal plan-first gate (AGE-14116):
+      // All top-level issues (no parentId) created as `todo` are auto-demoted
+      // to `backlog` unless they have an approved plan or pending CEO review.
+      // Child issues (with parentId) skip this gate entirely — they are
+      // implementation tasks spawned from an approved parent plan.
+      //
+      // Replaces the per-company planRequired flag. No creator-based exemptions:
+      // board, Juno, Dispatch, and agent-created issues all go through the gate.
+      // Only plan-approval signals (accepted request_confirmation, native plan
+      // document) allow an issue to proceed without demotion.
+      // -----------------------------------------------------------------------
+      if (!issue?.parentId && status === "todo") {
+        let exemptFromDemotion = false;
+
+        // AGE-12953: CEO plan-review routing.
+        // Check if there is a pending request_confirmation for the latest plan
+        // revision. If so, route the issue to the company CEO agent for
+        // autonomous review and stop processing. If the plan was accepted while
+        // the CEO is the assignee, restore the original implementer so they can
+        // continue.
+        if (!exemptFromDemotion) {
+          const ceoId = await getCeoAgentId(companyId);
+          if (ceoId) {
+            const planState = await getPlanConfirmationState(issueId);
+            if (planState.pending !== null) {
+              // Pending plan confirmation — route to CEO for review
+              if (issue?.assigneeAgentId !== ceoId) {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ assigneeAgentId: ceoId }),
+                });
+                ctx.logger.info(
+                  "Universal plan gate (created): routed pending plan confirmation to CEO",
+                  {
+                    issueId,
+                    identifier: issue?.identifier,
+                    ceoId,
+                  },
+                );
+              }
+              return; // Pending review — don't demote, don't advance
+            }
+            if (
+              planState.accepted !== null &&
+              issue?.assigneeAgentId === ceoId &&
+              planState.accepted.createdByAgentId
+            ) {
+              // Plan accepted by CEO — restore the original implementer
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  assigneeAgentId: planState.accepted.createdByAgentId,
+                }),
+              });
+              ctx.logger.info(
+                "Universal plan gate (created): plan accepted — restored implementer after CEO review",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  implementerId: planState.accepted.createdByAgentId,
+                },
+              );
+              exemptFromDemotion = true;
+            } else if (planState.accepted !== null) {
+              exemptFromDemotion = true;
+            } else if (
+              planState.declined !== null &&
+              issue?.assigneeAgentId === ceoId &&
+              planState.declined.createdByAgentId
+            ) {
+              // Plan declined by CEO — restore the original implementer and signal rejection.
+              // exemptFromDemotion stays false so the gate demotes to backlog.
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  assigneeAgentId: planState.declined.createdByAgentId,
+                }),
+              });
+              const declineMsg = planState.declined.reason
+                ? `Plan declined by CEO: ${planState.declined.reason}`
+                : "Plan declined by CEO. Please revise the plan document and resubmit for review.";
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ body: declineMsg }),
+              });
+              ctx.logger.info(
+                "Universal plan gate (created): plan declined — restored implementer, will demote to backlog",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  implementerId: planState.declined.createdByAgentId,
+                  reason: planState.declined.reason,
+                },
+              );
+            }
+          }
+        }
+
+        // AGE-12754: native plan-approval primitive
+        // (plan keyed document + accepted request_confirmation matching latest revision)
+        if (!exemptFromDemotion) {
+          const nativeApproved = await checkNativePlanApproval(
+            ctx,
+            issueId,
+            issue?.identifier,
+          );
+          if (nativeApproved) {
+            exemptFromDemotion = true;
+          }
+        }
+
+        if (!exemptFromDemotion) {
+          ctx.logger.info(
+            "Universal plan gate (created): auto-demoting todo → backlog",
+            {
+              issueId,
+              identifier: issue?.identifier,
+              companyId,
+            },
+          );
+
+          // PATCH status to backlog
+          await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "backlog" }),
+          });
+
+          // Post explanatory comment (with dedup to prevent spam on webhook retries)
+          const isDupPlanFirst = await isDuplicateAlertComment(
+            issueId,
+            "plan-first-demotion",
+          );
+          if (!isDupPlanFirst) {
+            await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                body: "**Universal Plan Gate: Demoted to Backlog**\n\nAll top-level issues require an approved plan before they can proceed to `todo`. This issue was created directly as `todo` without one, so it has been demoted to `backlog`.\n\nChild issues (with a `parentId`) skip this gate automatically.\n\nTo unblock:\n1. Write the plan to the [`plan` keyed document](#document-plan) on this issue (`PUT /api/issues/<id>/documents/plan`).\n2. Create a `request_confirmation` interaction with `idempotencyKey: confirmation:<issueId>:plan:<latestRevisionId>` and wait for acceptance.\n\n[alert-dedup:plan-first-demotion]",
+              }),
+            });
+            releaseAlertCommentInflight(issueId, "plan-first-demotion");
+            ctx.logger.info(
+              "Universal plan gate (created): demoted to backlog, posted explanatory comment",
+              {
+                issueId,
+                identifier: issue?.identifier,
+              },
+            );
+          } else {
+            ctx.logger.info(
+              "Universal plan gate (created): skipped duplicate demotion comment (dedup)",
+              {
+                issueId,
+                identifier: issue?.identifier,
+              },
+            );
+          }
+          return; // Issue demoted — stop further processing on this event
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Auto-dependency detection (Phase 4.7 / AGE-306):
+      // Scan issue description for "Depends on: AGE-XXX" patterns.
+      // Open deps → apply blocked:issue-AGE-XXX labels + set status to blocked.
+      // All done → leave as todo, post informational comment.
+      // -----------------------------------------------------------------------
+      if (isConfiguredCompany(companyId) && issue?.description) {
+        const description: string = issue.description;
+
+        // Match all three supported patterns in a single pass:
+        // "Depends on: AGE-XXX", "Depends on AGE-XXX", "**Depends on:** AGE-XXX"
+        const depRegex =
+          /(?:\*\*Depends on:\*\*|Depends on:|Depends on)\s+(AGE-\d+)/gi;
+        const rawMatches = [...description.matchAll(depRegex)];
+        const identifiers = [
+          ...new Set(rawMatches.map((m) => m[1].toUpperCase())),
+        ];
+
+        if (identifiers.length > 0) {
+          ctx.logger.info("Auto-dep: dependency patterns found in new issue", {
+            identifier: issue?.identifier,
+            deps: identifiers,
+          });
+
+          type DepResult = {
+            identifier: string;
+            status: string;
+            open: boolean;
+          };
+          const depResults: DepResult[] = [];
+
+          for (const depId of identifiers) {
+            try {
+              const res = await fetch(
+                `${PAPERCLIP_API}/api/companies/${companyId}/issues?identifier=${depId}`,
+              );
+              if (res.ok) {
+                const data = await res.json();
+                const list: any[] = Array.isArray(data)
+                  ? data
+                  : (data.issues ?? []);
+                const dep = list.find((i: any) => i.identifier === depId);
+                if (dep) {
+                  const open =
+                    dep.status !== "done" && dep.status !== "cancelled";
+                  depResults.push({
+                    identifier: depId,
+                    status: dep.status,
+                    open,
+                  });
+                } else {
+                  // Issue not found — treat as open (safe default)
+                  depResults.push({
+                    identifier: depId,
+                    status: "not found",
+                    open: true,
+                  });
+                }
+              } else {
+                depResults.push({
+                  identifier: depId,
+                  status: "lookup error",
+                  open: true,
+                });
+              }
+            } catch (err) {
+              ctx.logger.error("Auto-dep: failed to look up dependency", {
+                depId,
+                err,
+              });
+              depResults.push({
+                identifier: depId,
+                status: "error",
+                open: true,
+              });
+            }
+          }
+
+          const openDeps = depResults.filter((d) => d.open);
+
+          if (openDeps.length > 0) {
+            // Collect existing label UUIDs (API returns {id, name} objects)
+            const existingLabelIds: string[] = (issue.labels ?? [])
+              .map((l: any) => (typeof l === "string" ? null : l.id))
+              .filter(Boolean);
+            const newBlockerLabels = openDeps.map(
+              (d) => `blocked:issue-${d.identifier}`,
+            );
+
+            try {
+              // Ensure each blocked:issue-AGE-XXX label exists and collect UUIDs.
+              // The PATCH API only accepts labelIds (UUIDs) — name strings are silently ignored.
+              const newLabelIds: string[] = [];
+              for (const labelName of newBlockerLabels) {
+                const id = await ensureBlockerLabel(companyId, labelName);
+                if (id) newLabelIds.push(id);
+              }
+              const mergedLabelIds = [
+                ...new Set([...existingLabelIds, ...newLabelIds]),
+              ];
+
+              // Single atomic PATCH (AGE-4962 fix): server handles labelIds+status in a single
+              // DB transaction. svc.update() commits both the issue row AND syncIssueLabels()
+              // before logActivity/pluginEventBus.emit fires, so ctx.issues.get() in the
+              // AGE-278 handler always sees committed labels.
+              //
+              // The v1.12.2 two-step workaround (labels first, then status) caused infinite loops:
+              // any code that PATCHed {status: "blocked"} without labelIds (e.g., auto-retry,
+              // manual API call) was repeatedly rejected by AGE-278 → revert → retry → loop.
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  labelIds: mergedLabelIds,
+                  status: "blocked",
+                }),
+              });
+              ctx.logger.info(
+                "Auto-dep: issue blocked on open dependencies (single atomic PATCH with labelIds + status)",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  labelIds: mergedLabelIds,
+                  openDeps: openDeps.map((d) => d.identifier),
+                },
+              );
+            } catch (err) {
+              ctx.logger.error(
+                "Auto-dep: failed to apply blocked status and labels",
+                { issueId, err },
+              );
+            }
+          }
+
+          // Post a comment listing all detected dependencies and their statuses
+          const depList = depResults
+            .map(
+              (d) =>
+                `- **${d.identifier}**: \`${d.status}\` ${d.open ? "(open — blocking)" : "(done — no block)"}`,
+            )
+            .join("\n");
+          const commentBody =
+            openDeps.length > 0
+              ? `**Auto-Dependency Detection — Issue Blocked**\n\nDependencies detected in issue description:\n${depList}\n\nThis issue has been blocked pending resolution of the open dependencies above. It will be automatically unblocked when those issues reach \`done\` status.`
+              : `**Auto-Dependency Detection — No Blocking Required**\n\nDependencies detected in issue description:\n${depList}\n\nAll dependencies are already \`done\` — no blocking applied.`;
+
+          try {
+            await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ body: commentBody }),
+            });
+            ctx.logger.info("Auto-dep: posted dependency detection comment", {
+              issueId,
+            });
+          } catch (err) {
+            ctx.logger.error("Auto-dep: failed to post dependency comment", {
+              issueId,
+              err,
+            });
+          }
+        }
+      }
+
+      // -----------------------------------------------------------------------
+      // Dispatcher wakeup (Phase W-2 / AGE-691):
+      // For dispatchRequired companies, if the new issue is unassigned and in a
+      // dispatchable status, wake the dispatcher immediately so it can assign work
+      // without waiting for the next periodic heartbeat.
+      //
+      // AGE-7292: Added checkout-level dedup — skip wakeup if this issue already
+      // has an active execution lock or if a wakeup was sent recently (60s window).
+      // -----------------------------------------------------------------------
+      if (
+        isConfiguredCompany(companyId) &&
+        !!getAgentId(companyId, "dispatcher")
+      ) {
+        const issueStatus: string = (issue?.status ?? "").toLowerCase();
+        const isUnassigned = !issue?.assigneeAgentId;
+        if (DISPATCH_WAKEUP_STATUSES.has(issueStatus) && isUnassigned) {
+          const dispatcherId = getAgentId(companyId, "dispatcher");
+          if (dispatcherId) {
+            // AGE-7292: Check dedup + execution lock before dispatching wakeup
+            const shouldWake = await shouldDispatchWakeup(
+              issueId,
+              companyId,
+              ctx,
+            );
+            if (shouldWake) {
+              try {
+                const wakeRes = await fetch(
+                  `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ reason: "new_unassigned_issue" }),
+                  },
+                );
+                ctx.logger.info("Dispatcher wakeup sent (issue.created)", {
+                  identifier: issue?.identifier,
+                  dispatcherId,
+                  status: wakeRes.status,
+                });
+              } catch (err) {
+                ctx.logger.error("Dispatcher wakeup failed (issue.created)", {
+                  issueId,
+                  err,
+                });
+              }
+            } else {
+              ctx.logger.info(
+                "AGE-7292: Dispatcher wakeup skipped for issue.created — dedup or active execution lock",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                },
+              );
+            }
+          }
+        }
+      }
 
       // A.4 moved earlier in this handler (see AGE-12411). Previously here,
       // it was status-gated by the TRIGGER_STATUSES filter above, which meant
       // CLI-filed `backlog` issues never received executionPolicy.
-      // NOTE: Dispatcher wakeup (Phase W-2 / AGE-691) removed — dispatcher role
-      // is retired and no companies use it. Paperclip native heartbeat handles wakeup.
     });
 
     // -------------------------------------------------------------------------
@@ -1679,7 +2142,7 @@ const plugin = definePlugin({
       // -----------------------------------------------------------------------
       if (isConfiguredCompany(companyId)) {
         try {
-          const wakeCheckRes = await apiFetch(
+          const wakeCheckRes = await fetch(
             `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
           );
           if (wakeCheckRes.ok) {
@@ -1820,7 +2283,7 @@ const plugin = definePlugin({
           let shouldSuppress = false;
           let suppressReason = "";
 
-          const commentsRes = await apiFetch(
+          const commentsRes = await fetch(
             `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
           );
           if (commentsRes.ok) {
@@ -1902,9 +2365,9 @@ const plugin = definePlugin({
                 issueId,
                 "dcw-circuit-breaker",
               );
-              if (!isDupCircuit && shouldEscalateToOrchestrator(companyId, "dcw-circuit-breaker")) {
+              if (!isDupCircuit) {
                 const orchestratorId = getAgentId(companyId, "orchestrator");
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -1925,7 +2388,7 @@ const plugin = definePlugin({
             }
 
             // Revert status to the correct terminal status (AGE-6845: use dcwRevertStatus, not "done").
-            await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+            await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ status: dcwRevertStatus }),
@@ -1970,6 +2433,349 @@ const plugin = definePlugin({
       }
 
       // -----------------------------------------------------------------------
+      // Validation rule (Phase 1.2): blocked → require structured blocker label
+      // -----------------------------------------------------------------------
+      if (newStatus === "blocked" && isConfiguredCompany(companyId)) {
+        try {
+          const issue = await ctx.issues.get(issueId, companyId);
+          const labels = issue?.labels ?? [];
+          const hasBlockerLabel = labels.some((label: any) => {
+            const name =
+              typeof label === "string" ? label : (label?.name ?? "");
+            // v1.19.0: reject wildcard/non-specific blocker labels like "blocked:issue-*".
+            // These can never be auto-resolved by the dependency watcher.
+            // Valid: blocked:issue-AGE-123, blocked:issue-FON-45
+            // Invalid: blocked:issue-*, blocked:issue-, blocked:issue-???
+            if (name.startsWith("blocked:issue-")) {
+              const ref = name.slice("blocked:issue-".length);
+              return /^[A-Z]+-\d+$/.test(ref); // must be IDENTIFIER format (PREFIX-NUMBER)
+            }
+            return (
+              name === "blocked:needs-approval" ||
+              name === "blocked:external" ||
+              name === "blocked:timeout"
+            );
+          });
+
+          if (!hasBlockerLabel) {
+            const revertStatus: string = previousStatus || "todo";
+            ctx.logger.info(
+              "Validation rule: blocked transition rejected — no blocker label",
+              {
+                issueId,
+                currentLabels: labels,
+              },
+            );
+
+            // -------------------------------------------------------------------
+            // System timeout detection (AGE-278 exemption):
+            // When Paperclip's native retry handler times out an agent execution,
+            // it moves the issue to `blocked` without a blocker label. Without
+            // this exemption, AGE-278 rejects the transition → revert → retry →
+            // rejected → loop until storm breaker fires after 3+ cycles, generating
+            // 20+ junk comments.
+            //
+            // Detection heuristics (either triggers the exemption):
+            //   1. The most recent comment (within 30 min) contains the Paperclip
+            //      continuation requeue signature ("Paperclip automatically retried
+            //      continuation").
+            //   2. The most recent comment (within 30 min) has no authorAgentId AND
+            //      no authorUserId — i.e., it's a system-generated status change
+            //      with no agent actor.
+            //
+            // When detected: auto-add `blocked:timeout` label, post a single
+            // comment noting the auto-block reason, and skip AGE-278 rejection.
+            // This replaces the old `blocked:external` approach and gives Juno/Chris
+            // a distinct signal (timeout vs generic external blocker).
+            // -------------------------------------------------------------------
+            let systemTimeoutDetected = false;
+            let systemTimeoutReason = "";
+            try {
+              const recentCommentsRes = await fetch(
+                `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
+              );
+              if (recentCommentsRes.ok) {
+                const allComments = await recentCommentsRes.json();
+                if (Array.isArray(allComments) && allComments.length > 0) {
+                  const latestComment = allComments[allComments.length - 1];
+                  const latestBody =
+                    typeof latestComment?.body === "string"
+                      ? latestComment.body
+                      : "";
+                  const latestTime = new Date(
+                    latestComment?.createdAt ?? "",
+                  ).getTime();
+                  const nowMs = Date.now();
+                  const SYSTEM_TIMEOUT_WINDOW = 30 * 60 * 1000; // 30 minutes
+                  const CONTINUATION_SIGNATURE =
+                    "Paperclip automatically retried continuation";
+                  const isWithinWindow =
+                    !Number.isNaN(latestTime) &&
+                    nowMs - latestTime < SYSTEM_TIMEOUT_WINDOW;
+
+                  if (isWithinWindow) {
+                    // Heuristic 1: Continuation requeue signature in most recent comment
+                    if (latestBody.includes(CONTINUATION_SIGNATURE)) {
+                      systemTimeoutDetected = true;
+                      systemTimeoutReason = `continuation-requeue (signature match, age=${Math.round((nowMs - latestTime) / 1000)}s)`;
+                    }
+                    // Heuristic 2: System-initiated status change — no agent or user author
+                    else if (
+                      (latestComment?.authorAgentId ?? null) === null &&
+                      (latestComment?.authorUserId ?? null) === null
+                    ) {
+                      systemTimeoutDetected = true;
+                      systemTimeoutReason = `system-transition (no authorAgentId, no authorUserId, age=${Math.round((nowMs - latestTime) / 1000)}s)`;
+                    }
+                  }
+
+                  if (systemTimeoutDetected) {
+                    ctx.logger.info(
+                      "System timeout detection: identified Paperclip system-initiated blocked transition",
+                      {
+                        issueId,
+                        identifier: issue?.identifier,
+                        reason: systemTimeoutReason,
+                      },
+                    );
+                  }
+                }
+              }
+            } catch (err) {
+              ctx.logger.error(
+                "System timeout detection: failed to check comments — proceeding with normal storm detection",
+                { issueId, err },
+              );
+            }
+
+            if (systemTimeoutDetected) {
+              // AGE-6845: Terminal-status guard — defence-in-depth for cold-queue recovery.
+              // If the issue API currently shows done or cancelled (cold-queue recovery fired
+              // but the DCW suppression lost a race), revert directly to the terminal status
+              // instead of leaving the issue stuck.
+              const currentStatusForCR = (issue?.status ?? "").toLowerCase();
+              if (
+                currentStatusForCR === "done" ||
+                currentStatusForCR === "cancelled"
+              ) {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ status: currentStatusForCR }),
+                });
+                ctx.logger.info(
+                  "System timeout detection: issue is terminal — reverted instead of blocking",
+                  {
+                    issueId,
+                    identifier: issue?.identifier,
+                    currentStatusForCR,
+                  },
+                );
+                return;
+              }
+
+              // AGE-11714: Allow the blocked transition without adding a label or reassigning.
+              // The previous approach (blocked:timeout label + Juno reassignment) created a
+              // deadlock: the label could not be removed via API, and manual in_progress
+              // transitions would re-trigger the same timeout cycle. The issue stays blocked;
+              // the assigned agent will pick it up on the next heartbeat once execution recovers.
+              ctx.logger.warn(
+                "System timeout detection: allowing blocked transition (AGE-278 exemption, no label)",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  reason: systemTimeoutReason,
+                },
+              );
+              return; // Allow the blocked transition — skip AGE-278 rejection and storm breaker
+            }
+
+            // -------------------------------------------------------------------
+            // AGE-5123: Retry storm breaker
+            // Before reverting, check if AGE-278 has rejected this issue ≥3 times
+            // within the last hour. If so, auto-apply blocked:external and allow
+            // the transition — breaking the auto-retry loop.
+            // -------------------------------------------------------------------
+            let stormDetected = false;
+            try {
+              const commentsRes = await fetch(
+                `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
+              );
+              if (commentsRes.ok) {
+                const comments = await commentsRes.json();
+                if (Array.isArray(comments)) {
+                  const now = Date.now();
+                  const recentRejections = comments.filter((c: any) => {
+                    if (
+                      typeof c.body !== "string" ||
+                      !c.body.includes(STORM_COMMENT_MATCH)
+                    )
+                      return false;
+                    const created = new Date(c.createdAt ?? "").getTime();
+                    return (
+                      !Number.isNaN(created) && now - created < STORM_WINDOW_MS
+                    );
+                  });
+                  ctx.logger.info(
+                    "Storm breaker: counted recent AGE-278 rejections",
+                    {
+                      issueId,
+                      recentRejectionCount: recentRejections.length,
+                      threshold: STORM_THRESHOLD,
+                    },
+                  );
+                  if (recentRejections.length >= STORM_THRESHOLD) {
+                    stormDetected = true;
+                  }
+                }
+              }
+            } catch (err) {
+              ctx.logger.error(
+                "Storm breaker: failed to count recent comments — proceeding with normal rejection",
+                { issueId, err },
+              );
+            }
+
+            if (stormDetected) {
+              // Auto-apply blocked:external to break the retry loop
+              ctx.logger.warn(
+                "Storm breaker: retry storm detected — auto-applying blocked:external to break loop",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                },
+              );
+              const externalLabelId = await ensureBlockerLabel(
+                companyId,
+                "blocked:external",
+              );
+              const existingLabelIds: string[] = (issue?.labels ?? [])
+                .map((l: any) => (typeof l === "string" ? null : l.id))
+                .filter(Boolean);
+              const mergedLabelIds = externalLabelId
+                ? [...new Set([...existingLabelIds, externalLabelId])]
+                : existingLabelIds;
+
+              // Route storm-broken issues to the orchestrator (Juno) for review.
+              // Without this, blocked:external issues from retry loops pile up with no
+              // escalation path. Juno wakes via wakeOnDemand on assignee change, reviews
+              // the issue, and either resolves, reassigns, or escalates to Chris.
+              // Only reassign if the orchestrator exists for this company AND the current
+              // assignee is not already the orchestrator (avoid no-op PATCH).
+              const orchestratorId = getAgentId(companyId, "orchestrator");
+              const currentAssigneeId = issue?.assigneeAgentId ?? null;
+              const shouldReassignToOrchestrator =
+                !!orchestratorId && currentAssigneeId !== orchestratorId;
+
+              // PATCH with blocked:external label + blocked status (+ orchestrator assignment) atomically
+              const patchBody: Record<string, any> = {
+                labelIds: mergedLabelIds,
+                status: "blocked",
+              };
+              if (shouldReassignToOrchestrator) {
+                patchBody.assigneeAgentId = orchestratorId;
+              }
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(patchBody),
+              });
+
+              // Post storm breaker comment (suppress duplicate AGE-278 text)
+              // AGE-5261: dedup — skip if a storm-breaker comment was already posted within 24h
+              const isDupStorm = await isDuplicateAlertComment(
+                issueId,
+                "storm-breaker",
+              );
+              if (!isDupStorm) {
+                const reviewerLine = shouldReassignToOrchestrator
+                  ? "\n\n**Assigned to the orchestrator (Juno) for review.** Juno will determine the correct resolution and escalate to Chris if needed."
+                  : "\n\nA human should review this issue to determine the correct resolution.";
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    body: `**⚡ Retry Storm Breaker (AGE-5123)**\n\nThis issue has been automatically set to \`blocked:external\` after \`${STORM_THRESHOLD}+\` failed attempts to transition to \`blocked\` without a valid blocker label within the last hour. This usually indicates an auto-retry loop.\n\nThe \`blocked:external\` label satisfies AGE-278 validation, breaking the loop.${reviewerLine}\n\n[alert-dedup:storm-breaker]`,
+                  }),
+                });
+                releaseAlertCommentInflight(issueId, "storm-breaker");
+              } else {
+                ctx.logger.info(
+                  "Storm breaker: skipped duplicate storm-breaker comment (AGE-5261 dedup)",
+                  { issueId },
+                );
+              }
+              ctx.logger.info(
+                "Storm breaker: auto-applied blocked:external, posted storm breaker comment",
+                {
+                  issueId,
+                  identifier: issue?.identifier,
+                  labelIds: mergedLabelIds,
+                  reassignedTo: shouldReassignToOrchestrator
+                    ? orchestratorId
+                    : null,
+                },
+              );
+              return; // Allow the blocked transition with blocked:external label
+            }
+
+            // Normal rejection: revert status and post error comment
+            const revertRes = await fetch(
+              `${PAPERCLIP_API}/api/issues/${issueId}`,
+              {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ status: revertStatus }),
+              },
+            );
+
+            if (revertRes.ok) {
+              // AGE-5123 noise suppression: if an AGE-278 rejection comment was already posted
+              // within the storm window (1 hour), skip posting another duplicate. The storm
+              // breaker already fires at threshold (3 rejections), but this prevents the
+              // 1st and 2nd rejections from also each creating a separate comment.
+              // We always revert the status — we just skip the duplicate comment.
+              const isDupRejection = await isDuplicateAlertComment(
+                issueId,
+                "age278-rejection",
+              );
+              if (!isDupRejection) {
+                const commentBody = `**AGE-278: Blocker Label Validation**\n\nThe transition to \`blocked\` was rejected because no structured blocker label was found.\n\n**Required:** Add one of these labels before setting status to \`blocked\`:\n- \`blocked:issue-{AGE-XXX}\` — for issues waiting on another issue to complete\n- \`blocked:needs-approval\` — for issues waiting on structural change approval\n- \`blocked:external\` — for issues waiting on external factors\n- \`blocked:timeout\` — for issues blocked by agent execution timeout (auto-applied by system)\n\n**Status reverted to:** \`${revertStatus}\`\n\n[alert-dedup:age278-rejection]`;
+
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ body: commentBody }),
+                });
+                releaseAlertCommentInflight(issueId, "age278-rejection");
+                ctx.logger.info(
+                  "Validation rule: posted error comment and reverted status",
+                  {
+                    issueId,
+                    revertedTo: previousStatus,
+                  },
+                );
+              } else {
+                ctx.logger.info(
+                  "Validation rule: skipped duplicate AGE-278 rejection comment (dedup)",
+                  {
+                    issueId,
+                    revertedTo: previousStatus,
+                  },
+                );
+              }
+            }
+            return;
+          }
+        } catch (err) {
+          ctx.logger.error(
+            "Validation rule failed: could not check blocker label",
+            { issueId, err },
+          );
+        }
+      }
+
+      // -----------------------------------------------------------------------
       // Blocker dependency auto-promotion (v1.19.0):
       // When an issue successfully transitions to blocked with blocked:issue-{IDENTIFIER}
       // labels, check each referenced issue. If the referenced issue is in `backlog`,
@@ -2001,7 +2807,7 @@ const plugin = definePlugin({
             let depCompanyId: string | null = null;
             try {
               // Try the current company first (most common case)
-              const res = await apiFetch(
+              const res = await fetch(
                 `${PAPERCLIP_API}/api/companies/${companyId}/issues?identifier=${depIdentifier}`,
               );
               if (res.ok) {
@@ -2016,7 +2822,7 @@ const plugin = definePlugin({
                   depCompanyId = companyId;
                   if (dep.status === "backlog") {
                     // Auto-promote to todo
-                    await apiFetch(`${PAPERCLIP_API}/api/issues/${dep.id}`, {
+                    await fetch(`${PAPERCLIP_API}/api/issues/${dep.id}`, {
                       method: "PATCH",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({ status: "todo" }),
@@ -2030,9 +2836,51 @@ const plugin = definePlugin({
                       },
                     );
 
-                    // NOTE: Dispatcher wakeup removed — dispatcher role retired.
+                    // Wake dispatcher if configured for this company
+                    // AGE-7292: Added checkout-level dedup check
+                    if (
+                      !!getAgentId(companyId, "dispatcher") &&
+                      !dep.assigneeAgentId
+                    ) {
+                      const dispatcherId = getAgentId(companyId, "dispatcher");
+                      if (dispatcherId) {
+                        const shouldWakeDep = await shouldDispatchWakeup(
+                          dep.id,
+                          companyId,
+                          ctx,
+                        );
+                        if (shouldWakeDep) {
+                          await fetch(
+                            `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
+                            {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                reason: `blocker_promoted_${depIdentifier}`,
+                              }),
+                            },
+                          );
+                          ctx.logger.info(
+                            "Blocker auto-promotion: woke dispatcher for promoted dependency",
+                            {
+                              dependency: depIdentifier,
+                              dispatcherId,
+                            },
+                          );
+                        } else {
+                          ctx.logger.info(
+                            "AGE-7292: Blocker auto-promotion dispatcher wakeup skipped — dedup or active execution lock",
+                            {
+                              dependency: depIdentifier,
+                              depIssueId: dep.id,
+                            },
+                          );
+                        }
+                      }
+                    }
+
                     // Post a comment on the dependency issue explaining why it was promoted
-                    await apiFetch(
+                    await fetch(
                       `${PAPERCLIP_API}/api/issues/${dep.id}/comments`,
                       {
                         method: "POST",
@@ -2081,7 +2929,7 @@ const plugin = definePlugin({
             // On the 3rd rejection, block the issue and escalate to Chris.
             let rejectionCount = 0;
             try {
-              const commentsRes = await apiFetch(
+              const commentsRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
               );
               if (commentsRes.ok) {
@@ -2131,7 +2979,7 @@ const plugin = definePlugin({
                 ? [...new Set([...circuitLabelIds, externalLabelId])]
                 : circuitLabelIds;
 
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -2146,7 +2994,7 @@ const plugin = definePlugin({
                 "circuit-breaker",
               );
               if (!isDupCircuit) {
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -2180,7 +3028,7 @@ const plugin = definePlugin({
                 rejectionCount,
               },
             );
-            await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+            await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ assigneeAgentId: implementerAgentId }),
@@ -2224,7 +3072,7 @@ const plugin = definePlugin({
 
             let hasEvidence = false;
             try {
-              const commentsRes = await apiFetch(
+              const commentsRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
               );
               if (commentsRes.ok) {
@@ -2256,13 +3104,13 @@ const plugin = definePlugin({
 
             if (!hasEvidence) {
               // Revert to in_progress
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ status: "in_progress" }),
               });
 
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -2685,7 +3533,7 @@ python3 /Users/openclaw/.openclaw/workspace/skills/gate-check-verify/gate_check_
 
                 if (uncommittedScripts.length > 0) {
                   // Block the transition
-                  await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                  await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ status: "in_progress" }),
@@ -2709,7 +3557,7 @@ See AGE-12102 for context.
 
 [alert-dedup:process-adapter-migration-gate]`;
 
-                  await apiFetch(
+                  await fetch(
                     `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
                     {
                       method: "POST",
@@ -2765,7 +3613,7 @@ See AGE-12102 for context.
           // Fetch the issue's comments
           let comments: any[] = [];
           try {
-            const commentsRes = await apiFetch(
+            const commentsRes = await fetch(
               `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
             );
             if (commentsRes.ok) {
@@ -2868,7 +3716,7 @@ See AGE-12102 for context.
 
               if (failures.length > 0) {
                 // Revert to in_progress
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
                   method: "PATCH",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ status: "in_progress" }),
@@ -2895,7 +3743,7 @@ This gate prevents false-done transitions by validating claimed work exists.
 
 [alert-dedup:self-verification-gate]`;
 
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ body: commentBody }),
@@ -3074,7 +3922,7 @@ This gate prevents false-done transitions by validating claimed work exists.
                   assigneeAgentId: null,
                 };
 
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${dependent.id}`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${dependent.id}`, {
                   method: "PATCH",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify(patchBody),
@@ -3082,7 +3930,7 @@ This gate prevents false-done transitions by validating claimed work exists.
 
                 // Second PATCH: re-assign to trigger wakeOnDemand
                 if (targetAssignee) {
-                  await apiFetch(`${PAPERCLIP_API}/api/issues/${dependent.id}`, {
+                  await fetch(`${PAPERCLIP_API}/api/issues/${dependent.id}`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -3101,7 +3949,7 @@ This gate prevents false-done transitions by validating claimed work exists.
                   ? `**Auto-Unblock (Partial)**\n\n${blockingIdentifier} resolved, removing ${blockerDescription}. Issue remains blocked by: ${remainingBlockerLabels.map((l: any) => (typeof l === "string" ? l : l?.name)).join(", ")}.\n\n[auto-unblock:${blockingIdentifier}]`
                   : `**Auto-Unblock**\n\n${blockingIdentifier} resolved, removing ${blockerDescription}. Issue fully unblocked → todo.\n\n[auto-unblock:${blockingIdentifier}]`;
 
-                await apiFetch(
+                await fetch(
                   `${PAPERCLIP_API}/api/issues/${dependent.id}/comments`,
                   {
                     method: "POST",
@@ -3143,6 +3991,183 @@ This gate prevents false-done transitions by validating claimed work exists.
         }
       }
 
+      // -----------------------------------------------------------------------
+      // Universal plan-first gate for issue.updated (AGE-14116):
+      // All top-level issues (no parentId) UPDATED to `todo` are auto-demoted
+      // to `backlog` unless they have an approved plan or pending CEO review.
+      // Child issues (with parentId) skip this gate entirely.
+      //
+      // This catches manual status changes (e.g., backlog → todo) that bypass
+      // planning. No creator-based exemptions — only plan-approval signals exempt.
+      // -----------------------------------------------------------------------
+      // Fetch issue before the gate check so we can inspect parentId.
+      // (Unlike issue.created, the updated event payload does not include
+      // the full issue object — we must fetch it to access parentId.)
+      const updatedIssue = await ctx.issues.get(issueId, companyId);
+      if (
+        !updatedIssue?.parentId &&
+        newStatus === "todo" &&
+        previousStatus !== "todo"
+      ) {
+        try {
+          const issue = updatedIssue;
+          let exemptFromDemotion = false;
+
+          // AGE-12953: CEO plan-review routing.
+          // Check if there is a pending request_confirmation for the latest plan
+          // revision. If so, route the issue to the company CEO agent for
+          // autonomous review. If the plan was accepted, restore the original
+          // implementer so they can continue.
+          if (!exemptFromDemotion) {
+            const ceoId = await getCeoAgentId(companyId);
+            if (ceoId) {
+              const planState = await getPlanConfirmationState(issueId);
+              if (planState.pending !== null) {
+                // Pending plan confirmation — route to CEO for review
+                if (issue?.assigneeAgentId !== ceoId) {
+                  await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ assigneeAgentId: ceoId }),
+                  });
+                  ctx.logger.info(
+                    "Universal plan gate (updated): routed pending plan confirmation to CEO",
+                    {
+                      issueId,
+                      identifier: issue?.identifier,
+                      ceoId,
+                    },
+                  );
+                }
+                return; // Pending review — don't demote, don't advance
+              }
+              if (
+                planState.accepted !== null &&
+                issue?.assigneeAgentId === ceoId &&
+                planState.accepted.createdByAgentId
+              ) {
+                // Plan accepted by CEO — restore the original implementer
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    assigneeAgentId: planState.accepted.createdByAgentId,
+                  }),
+                });
+                ctx.logger.info(
+                  "Universal plan gate (updated): plan accepted — restored implementer after CEO review",
+                  {
+                    issueId,
+                    identifier: issue?.identifier,
+                    implementerId: planState.accepted.createdByAgentId,
+                  },
+                );
+                exemptFromDemotion = true;
+              } else if (planState.accepted !== null) {
+                exemptFromDemotion = true;
+              } else if (
+                planState.declined !== null &&
+                issue?.assigneeAgentId === ceoId &&
+                planState.declined.createdByAgentId
+              ) {
+                // Plan declined by CEO — restore the original implementer and signal rejection.
+                // exemptFromDemotion stays false so the gate demotes to backlog.
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    assigneeAgentId: planState.declined.createdByAgentId,
+                  }),
+                });
+                const declineMsg = planState.declined.reason
+                  ? `Plan declined by CEO: ${planState.declined.reason}`
+                  : "Plan declined by CEO. Please revise the plan document and resubmit for review.";
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ body: declineMsg }),
+                });
+                ctx.logger.info(
+                  "Universal plan gate (updated): plan declined — restored implementer, will demote to backlog",
+                  {
+                    issueId,
+                    identifier: issue?.identifier,
+                    implementerId: planState.declined.createdByAgentId,
+                    reason: planState.declined.reason,
+                  },
+                );
+              }
+            }
+          }
+
+          // AGE-12754: native plan-approval primitive
+          // (plan keyed document + accepted request_confirmation matching latest revision)
+          if (!exemptFromDemotion) {
+            const nativeApproved = await checkNativePlanApproval(
+              ctx,
+              issueId,
+              issue?.identifier,
+            );
+            if (nativeApproved) {
+              exemptFromDemotion = true;
+            }
+          }
+
+          if (!exemptFromDemotion) {
+            ctx.logger.info(
+              "Universal plan gate (updated): auto-demoting todo → backlog",
+              {
+                issueId,
+                identifier: issue?.identifier,
+                companyId,
+                previousStatus,
+              },
+            );
+
+            await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ status: "backlog" }),
+            });
+
+            // Use dedup check to avoid duplicate plan-first comments
+            const isDupPlanFirst = await isDuplicateAlertComment(
+              issueId,
+              "plan-first-demotion",
+            );
+            if (!isDupPlanFirst) {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  body: "**Universal Plan Gate: Demoted to Backlog**\n\nAll top-level issues require an approved plan before they can proceed to `todo`. This issue was moved to `todo` without one, so it has been demoted to `backlog`.\n\nChild issues (with a `parentId`) skip this gate automatically.\n\nTo unblock:\n1. Write the plan to the [`plan` keyed document](#document-plan) on this issue (`PUT /api/issues/<id>/documents/plan`).\n2. Create a `request_confirmation` interaction with `idempotencyKey: confirmation:<issueId>:plan:<latestRevisionId>` and wait for acceptance.\n\n[alert-dedup:plan-first-demotion]",
+                }),
+              });
+              releaseAlertCommentInflight(issueId, "plan-first-demotion");
+            } else {
+              ctx.logger.info(
+                "Universal plan gate (updated): skipped duplicate demotion comment (dedup)",
+                { issueId },
+              );
+            }
+
+            ctx.logger.info(
+              "Universal plan gate (updated): demoted to backlog",
+              {
+                issueId,
+                identifier: issue?.identifier,
+              },
+            );
+            return; // Issue demoted — stop further processing on this event
+          }
+        } catch (err) {
+          ctx.logger.error(
+            "Universal plan gate (updated): error checking/demoting issue",
+            { issueId, err },
+          );
+        }
+      }
+
       // Log other status changes for observability
       if (TRIGGER_STATUSES.has(newStatus)) {
         ctx.logger.info("Issue transitioned to actionable status", {
@@ -3153,8 +4178,64 @@ This gate prevents false-done transitions by validating claimed work exists.
         // Paperclip heartbeat handles agent wakeup on assignment
       }
 
-      // NOTE: Dispatcher wakeup (Phase W-2 / AGE-691) removed — dispatcher role
-      // is retired. Paperclip native heartbeat handles agent wakeup on status change.
+      // -----------------------------------------------------------------------
+      // Dispatcher wakeup (Phase W-2 / AGE-691):
+      // For dispatchRequired companies, if an issue transitions to todo/backlog
+      // while unassigned, wake the dispatcher immediately.
+      //
+      // AGE-7292: Added checkout-level dedup — skip wakeup if this issue already
+      // has an active execution lock or if a wakeup was sent recently (60s window).
+      // -----------------------------------------------------------------------
+      if (
+        isConfiguredCompany(companyId) &&
+        !!getAgentId(companyId, "dispatcher") &&
+        DISPATCH_WAKEUP_STATUSES.has(newStatus)
+      ) {
+        try {
+          const wakeupIssue = await ctx.issues.get(issueId, companyId);
+          const isUnassigned = !wakeupIssue?.assigneeAgentId;
+          if (isUnassigned) {
+            const dispatcherId = getAgentId(companyId, "dispatcher");
+            if (dispatcherId) {
+              // AGE-7292: Check dedup + execution lock before dispatching wakeup
+              const shouldWake = await shouldDispatchWakeup(
+                issueId,
+                companyId,
+                ctx,
+              );
+              if (shouldWake) {
+                const wakeRes = await fetch(
+                  `${PAPERCLIP_API}/api/agents/${dispatcherId}/wakeup`,
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ reason: "new_unassigned_issue" }),
+                  },
+                );
+                ctx.logger.info("Dispatcher wakeup sent (issue.updated)", {
+                  issueId,
+                  dispatcherId,
+                  newStatus,
+                  status: wakeRes.status,
+                });
+              } else {
+                ctx.logger.info(
+                  "AGE-7292: Dispatcher wakeup skipped for issue.updated — dedup or active execution lock",
+                  {
+                    issueId,
+                    newStatus,
+                  },
+                );
+              }
+            }
+          }
+        } catch (err) {
+          ctx.logger.error("Dispatcher wakeup failed (issue.updated)", {
+            issueId,
+            err,
+          });
+        }
+      }
     });
 
     // -------------------------------------------------------------------------
@@ -3237,7 +4318,7 @@ This gate prevents false-done transitions by validating claimed work exists.
             approvalLabelNames,
           );
 
-          await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+          await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -3247,7 +4328,7 @@ This gate prevents false-done transitions by validating claimed work exists.
             }),
           });
 
-          await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+          await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -3285,7 +4366,7 @@ ${decisionNote ? `**Reason**: ${decisionNote}` : "**Reason**: See approval decis
 
 This issue has been unblocked. Please review the rejection reason and revise your approach before resubmitting.`;
 
-          await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+          await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ body: commentBody }),
@@ -3311,6 +4392,185 @@ This issue has been unblocked. Please review the rejection reason and revise you
     });
 
     // ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // Issue onboarding sweep (AGE-216 workaround)
+    // Paperclip host does not deliver issue.created events to plugin workers.
+    // This sweep catches new issues that never went through the reactive handler
+    // and applies the two operations issue.created was responsible for:
+    //   1. A.4 executionPolicy auto-apply (reviewer/approver lifecycle)
+    //   2. Universal plan-first gate (top-level todo → backlog without approved plan)
+    // Runs every 5 minutes. Both operations are idempotent.
+    // ---------------------------------------------------------------------------
+    async function sweepIssueOnboarding() {
+      for (const [companyId] of Object.entries(routingConfig.companies)) {
+        try {
+          const reviewerAgentId = getAgentId(companyId, "reviewer");
+          if (!reviewerAgentId) continue;
+          const approverAgentId = getAgentId(companyId, "approver");
+
+          // Fetch issues in states that need onboarding checks
+          const issuesRes = await fetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`,
+          );
+          if (!issuesRes.ok) continue;
+          const issues: any[] = await issuesRes.json();
+          if (!Array.isArray(issues)) continue;
+
+          for (const issue of issues) {
+            const issueId: string = issue.id;
+            const status: string = (issue.status ?? "").toLowerCase();
+            const issueTitle: string = issue.title ?? "";
+            const identifier: string = issue.identifier ?? issueId;
+
+            // A.4: Apply executionPolicy if missing.
+            // Mirrors the issue.created A.4 block exactly — idempotent via !issue.executionPolicy guard.
+            if (!issue.executionPolicy) {
+              const isGateIssue = /^\[gate\]/i.test(issueTitle);
+              const needsApproval = approverAgentId !== null;
+
+              if (!isGateIssue) {
+                const stages: object[] = [
+                  {
+                    id: randomUUID(),
+                    type: "review",
+                    approvalsNeeded: 1,
+                    participants: [
+                      {
+                        id: randomUUID(),
+                        type: "agent",
+                        agentId: reviewerAgentId,
+                      },
+                    ],
+                  },
+                ];
+                if (needsApproval) {
+                  stages.push({
+                    id: randomUUID(),
+                    type: "approval",
+                    approvalsNeeded: 1,
+                    participants: [
+                      {
+                        id: randomUUID(),
+                        type: "agent",
+                        agentId: approverAgentId,
+                      },
+                    ],
+                  });
+                }
+                const patchRes = await fetch(
+                  `${PAPERCLIP_API}/api/issues/${issueId}`,
+                  {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      executionPolicy: {
+                        mode: "normal",
+                        commentRequired: true,
+                        stages,
+                      },
+                    }),
+                  },
+                );
+                if (patchRes.ok) {
+                  ctx.logger.info("A.4 sweep: applied executionPolicy", {
+                    identifier,
+                    status,
+                    reviewerAgentId,
+                    approverAgentId: needsApproval ? approverAgentId : null,
+                    companyId,
+                  });
+                } else {
+                  ctx.logger.warn(
+                    "A.4 sweep: failed to apply executionPolicy",
+                    {
+                      identifier,
+                      httpStatus: patchRes.status,
+                    },
+                  );
+                }
+              }
+            }
+
+            // Plan-first gate: demote top-level todo issues without an approved plan.
+            // Only fires for status=todo (backlog issues already passed through or were demoted).
+            if (!issue?.parentId && status === "todo") {
+              const nativeApproved = await checkNativePlanApproval(
+                ctx,
+                issueId,
+                identifier,
+              );
+              if (!nativeApproved) {
+                // Check CEO routing (pending plan confirmation)
+                const ceoId = await getCeoAgentId(companyId);
+                if (ceoId) {
+                  const planState = await getPlanConfirmationState(issueId);
+                  if (planState.pending !== null) {
+                    if (issue?.assigneeAgentId !== ceoId) {
+                      await fetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ assigneeAgentId: ceoId }),
+                      });
+                      ctx.logger.info(
+                        "Plan gate sweep: routed pending plan confirmation to CEO",
+                        {
+                          identifier,
+                          ceoId,
+                        },
+                      );
+                    }
+                    continue; // Pending review — don't demote
+                  }
+                  if (planState.accepted !== null) continue; // Plan approved — skip demotion
+                }
+
+                // No approved plan — demote to backlog
+                const demoteRes = await fetch(
+                  `${PAPERCLIP_API}/api/issues/${issueId}`,
+                  {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ status: "backlog" }),
+                  },
+                );
+                if (demoteRes.ok) {
+                  ctx.logger.info(
+                    "Plan gate sweep: demoted todo → backlog (no approved plan)",
+                    {
+                      identifier,
+                      companyId,
+                    },
+                  );
+                  const isDup = await isDuplicateAlertComment(
+                    issueId,
+                    "plan-first-demotion",
+                  );
+                  if (!isDup) {
+                    await fetch(
+                      `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
+                      {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          body: "**Universal Plan Gate: Demoted to Backlog**\n\nAll top-level issues require an approved plan before they can proceed to `todo`. This issue was created directly as `todo` without one, so it has been demoted to `backlog`.\n\nChild issues (with a `parentId`) skip this gate automatically.\n\nTo unblock:\n1. Write the plan to the [`plan` keyed document](#document-plan) on this issue (`PUT /api/issues/<id>/documents/plan`).\n2. Create a `request_confirmation` interaction with `idempotencyKey: confirmation:<issueId>:plan:<latestRevisionId>` and wait for acceptance.\n\n[alert-dedup:plan-first-demotion]",
+                        }),
+                      },
+                    );
+                    releaseAlertCommentInflight(issueId, "plan-first-demotion");
+                  }
+                }
+              }
+            }
+          }
+        } catch (err) {
+          ctx.logger.warn("Issue onboarding sweep: error scanning company", {
+            companyId,
+            error: String(err),
+          });
+        }
+      }
+    }
+
     // Cold-queue recovery defense (AGE-6413)
     // PaperClip's server-side cold-queue recovery re-queues completed issues
     // (status=done with completedAt set) based on stale checkout/execution run IDs
@@ -3329,7 +4589,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
       )) {
         try {
           // Query all active (non-done, non-cancelled) issues for this company
-          const issuesRes = await apiFetch(
+          const issuesRes = await fetch(
             `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,in_progress,backlog,blocked,in_review,triage,unstarted&limit=200`,
           );
           if (!issuesRes.ok) continue;
@@ -3374,7 +4634,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
             const recentSuppressions = existingTs.length;
 
             // Revert the issue to its appropriate terminal status
-            const revertRes = await apiFetch(
+            const revertRes = await fetch(
               `${PAPERCLIP_API}/api/issues/${issueId}`,
               {
                 method: "PATCH",
@@ -3420,9 +4680,9 @@ This issue has been unblocked. Please review the rejection reason and revise you
               issueId,
               "cold-queue-recovery",
             );
-            if (!isDupAlert && shouldEscalateToOrchestrator(companyId, "cold-queue-recovery")) {
+            if (!isDupAlert) {
               const orchestratorId = getAgentId(companyId, "orchestrator");
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -3457,6 +4717,173 @@ This issue has been unblocked. Please review the rejection reason and revise you
       }
     }
 
+    // ---------------------------------------------------------------------------
+    // Cross-company assignment guard sweep (AGE-7010)
+    // Paperclip's native wakeOnDemand does not validate that the assigned agent's
+    // company matches the issue's company. This causes cross-company wake events
+    // where an AGE-scoped agent is dispatched for a KAL issue (or vice versa),
+    // resulting in API auth failures and wasted run cycles.
+    //
+    // This sweep detects active issues where assigneeAgentId belongs to a different
+    // company than the issue, and alerts the orchestrator for manual triage.
+    // The server-side fix (recommended) should validate company match before
+    // dispatching a wake event.
+    // ---------------------------------------------------------------------------
+    const XCA_CIRCUIT_BREAKER_THRESHOLD = 3;
+    const XCA_CIRCUIT_WINDOW_MS = 30 * 60 * 1000; // 30 minutes
+    const XCA_SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+    const xcaSweepTracker = new Map<string, number[]>(); // issueId → timestamps
+
+    // Build a lookup: agentId → companyId across ALL configured companies
+    async function buildAgentCompanyMap(): Promise<Map<string, string>> {
+      const map = new Map<string, string>();
+      for (const [companyId] of Object.entries(routingConfig.companies)) {
+        try {
+          const agentsRes = await fetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/agents`,
+          );
+          if (!agentsRes.ok) continue;
+          const agents: any[] = await agentsRes.json();
+          if (!Array.isArray(agents)) continue;
+          for (const agent of agents) {
+            if (agent.id && agent.companyId) {
+              map.set(agent.id, agent.companyId);
+            }
+          }
+        } catch {
+          // Skip companies we can't read
+        }
+      }
+      return map;
+    }
+
+    async function sweepCrossCompanyAssignments() {
+      const agentCompanyMap = await buildAgentCompanyMap();
+      if (agentCompanyMap.size === 0) return;
+
+      for (const [companyId] of Object.entries(routingConfig.companies)) {
+        try {
+          const issuesRes = await fetch(
+            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,in_progress,backlog,blocked,in_review,triage,unstarted&limit=200`,
+          );
+          if (!issuesRes.ok) continue;
+          const issues: any[] = await issuesRes.json();
+          if (!Array.isArray(issues)) continue;
+
+          for (const issue of issues) {
+            const assigneeAgentId = issue.assigneeAgentId;
+            if (!assigneeAgentId) continue; // Unassigned — skip
+
+            const issueCompanyId = issue.companyId ?? companyId;
+            const agentCompanyId = agentCompanyMap.get(assigneeAgentId);
+
+            // Agent not found in any configured company — can't validate, skip
+            if (!agentCompanyId) continue;
+
+            // Company match — fine
+            if (agentCompanyId === issueCompanyId) continue;
+
+            // Cross-company mismatch detected!
+            const issueId = issue.id;
+            const identifier = issue.identifier ?? issueId;
+
+            ctx.logger.warn("Cross-company assignment detected", {
+              event: "xca_mismatch",
+              issueId,
+              identifier,
+              issueCompanyId,
+              assigneeAgentId,
+              agentCompanyId,
+            });
+
+            // Prune stale suppression timestamps
+            const now = Date.now();
+            const existingTs = (xcaSweepTracker.get(issueId) ?? []).filter(
+              (ts) => now - ts < XCA_CIRCUIT_WINDOW_MS,
+            );
+            xcaSweepTracker.set(issueId, existingTs);
+            const recentDetections = existingTs.length;
+
+            // Clear the mismatched assignee so Paperclip stops sending wasted wake events
+            const clearRes = await fetch(
+              `${PAPERCLIP_API}/api/issues/${issueId}`,
+              {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ assigneeAgentId: null }),
+              },
+            );
+
+            if (clearRes.ok) {
+              ctx.logger.info("Cleared cross-company assignee", {
+                event: "xca_assignee_cleared",
+                issueId,
+                identifier,
+                assigneeAgentId,
+                agentCompanyId,
+                issueCompanyId,
+              });
+            } else {
+              const errBody = await clearRes.text();
+              ctx.logger.warn("Failed to clear cross-company assignee", {
+                event: "xca_clear_failed",
+                issueId,
+                identifier,
+                status: clearRes.status,
+                body: errBody,
+              });
+            }
+
+            // Record detection timestamp for circuit breaker
+            existingTs.push(now);
+            xcaSweepTracker.set(issueId, existingTs);
+
+            // Post deduped alert comment
+            const isDupAlert = await isDuplicateAlertComment(
+              issueId,
+              "cross-company-assignment",
+            );
+            if (!isDupAlert) {
+              const orchestratorId = getAgentId(issueCompanyId, "orchestrator");
+              const agentName = [...agentCompanyMap.entries()].find(
+                ([id]) => id === assigneeAgentId,
+              )
+                ? assigneeAgentId
+                : assigneeAgentId;
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  body: `**🔀 Cross-Company Assignment Detected (AGE-7010)**\n\nThis issue (company: \`${issueCompanyId}\`) was assigned to agent \`${assigneeAgentId}\` from a different company (\`${agentCompanyId}\`). Paperclip's native wakeOnDemand dispatched a wake event to this agent, whose API key cannot access the issue's company — causing authentication failures and wasted run cycles.\n\nThe mismatched assignee has been cleared. This issue needs manual re-assignment to an agent in the correct company.${recentDetections >= XCA_CIRCUIT_BREAKER_THRESHOLD ? `\n\n⚠️ **Circuit breaker:** This issue has been flagged **${recentDetections + 1} times in 30 minutes** — the underlying routing bug is persistently re-assigning cross-company agents. ${orchestratorId ? "Routing to orchestrator for investigation." : "Manual review required."}` : ""}\n\n**Root cause:** Paperclip wake dispatch does not validate agent↔issue company match (AGE-7010).\n\n[alert-dedup:cross-company-assignment]`,
+                }),
+              });
+              releaseAlertCommentInflight(issueId, "cross-company-assignment");
+            }
+
+            // Circuit breaker: escalate if same issue repeatedly mismatched
+            if (recentDetections >= XCA_CIRCUIT_BREAKER_THRESHOLD) {
+              ctx.logger.warn(
+                "Cross-company assignment: circuit breaker triggered",
+                {
+                  event: "xca_circuit_breaker",
+                  issueId,
+                  identifier,
+                  recentDetections: recentDetections + 1,
+                },
+              );
+            }
+          }
+        } catch (err) {
+          ctx.logger.warn(
+            "Cross-company assignment sweep: error scanning company",
+            {
+              companyId,
+              error: String(err),
+            },
+          );
+        }
+      }
+    }
 
     // ---------------------------------------------------------------------------
     // Reviewer close recovery sweep (AGE-6132)
@@ -3481,7 +4908,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
 
         try {
           // Fetch issues in in_review and blocked:external
-          const issuesRes = await apiFetch(
+          const issuesRes = await fetch(
             `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=in_review,blocked&limit=200`,
           );
           if (!issuesRes.ok) continue;
@@ -3511,7 +4938,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
 
             try {
               // Fetch comments to find verdict
-              const commentsRes = await apiFetch(
+              const commentsRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${issueId}/comments`,
               );
               if (!commentsRes.ok) continue;
@@ -3600,7 +5027,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
                 patchBody.assigneeAgentId = null;
               }
 
-              const patchRes = await apiFetch(
+              const patchRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${issueId}`,
                 {
                   method: "PATCH",
@@ -3644,7 +5071,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
                 "reviewer-close-recovery",
               );
               if (!isDupAlert) {
-                await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+                await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -3702,7 +5129,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
       )) {
         try {
           // Query active issues that could have stale locks
-          const issuesRes = await apiFetch(
+          const issuesRes = await fetch(
             `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,in_progress,backlog,blocked,in_review,triage,unstarted&limit=200`,
           );
           if (!issuesRes.ok) continue;
@@ -3748,7 +5175,7 @@ This issue has been unblocked. Please review the rejection reason and revise you
 
             // Release the execution lock via the /release endpoint
             try {
-              const releaseRes = await apiFetch(
+              const releaseRes = await fetch(
                 `${PAPERCLIP_API}/api/issues/${issueId}/release`,
                 {
                   method: "POST",
@@ -3792,9 +5219,9 @@ This issue has been unblocked. Please review the rejection reason and revise you
               issueId,
               "stale-execution-lock",
             );
-            if (!isDupAlert && shouldEscalateToOrchestrator(companyId, "stale-lock-release")) {
+            if (!isDupAlert) {
               const orchestratorId = getAgentId(companyId, "orchestrator");
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
+              await fetch(`${PAPERCLIP_API}/api/issues/${issueId}/comments`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -3829,248 +5256,17 @@ This issue has been unblocked. Please review the rejection reason and revise you
       }
     }
 
-    // ---------------------------------------------------------------------------
-    // Cold-queue dispatch sweep (AGE-114)
-    // Scans todo/backlog issues with an assignee but no active run and wakes
-    // the assignee (or dispatcher if one exists). Fixes the dead no-op where
-    // getAgentId(companyId, "dispatcher") always returned null because no
-    // company has a dispatcher role, causing the entire sweep to skip every issue.
-    // ---------------------------------------------------------------------------
-    async function sweepColdQueue() {
-      for (const [companyId] of Object.entries(routingConfig.companies)) {
-        try {
-          const dispatcherId = getAgentId(companyId, "dispatcher");
-          const agentsWokenThisSweep = new Set<string>();
-          const issuesRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=todo,backlog&limit=200`,
-          );
-          if (!issuesRes.ok) continue;
-          const issues = await issuesRes.json();
-          if (!Array.isArray(issues)) continue;
-          const agentsRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/agents`,
-          );
-          if (!agentsRes.ok) continue;
-          const agents = await agentsRes.json();
-          if (!Array.isArray(agents)) continue;
-          const agentStatusMap = new Map<string, string>();
-          for (const agent of agents) {
-            if (agent.id) agentStatusMap.set(agent.id, agent.status ?? "unknown");
-          }
-          let dispatched = 0;
-          let skipped = 0;
-          for (const issue of issues) {
-            const assigneeAgentId: string | null = issue.assigneeAgentId ?? null;
-            if (!assigneeAgentId) { skipped++; continue; }
-            if (!COLD_QUEUE_DISPATCHABLE_STATUSES.has((issue.status ?? "").toLowerCase())) {
-              skipped++; continue;
-            }
-            if (issue.executionRunId) {
-              ctx.logger.debug("Cold-queue sweep: skipping issue with active execution run", {
-                event: "cold_queue_skip_has_run",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                executionRunId: issue.executionRunId,
-              });
-              skipped++; continue;
-            }
-            if (issue.executionLockedAt) {
-              const lockAgeMs = Date.now() - new Date(issue.executionLockedAt).getTime();
-              if (lockAgeMs < STALE_EXECUTION_LOCK_THRESHOLD_MS) {
-                ctx.logger.debug("Cold-queue sweep: skipping issue with fresh execution lock", {
-                  event: "cold_queue_skip_fresh_lock",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  lockAgeMs,
-                });
-                skipped++; continue;
-              }
-            }
-            const shouldWake = await shouldDispatchWakeup(issue.id, companyId, ctx);
-            if (!shouldWake) {
-              ctx.logger.info("Cold-queue sweep: dedup window or lock skip", {
-                event: "cold_queue_dedup_skip",
-                issueId: issue.id,
-                identifier: issue.identifier,
-              });
-              skipped++; continue;
-            }
-            const agentStatus = agentStatusMap.get(assigneeAgentId);
-            if (agentStatus === "running") {
-              ctx.logger.debug("Cold-queue sweep: skipping — agent already running", {
-                event: "cold_queue_skip_agent_running",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                assigneeAgentId,
-                agentStatus,
-              });
-              skipped++; continue;
-            }
-            const wakeTargetId = dispatcherId ?? assigneeAgentId;
-            if (agentsWokenThisSweep.has(wakeTargetId)) {
-              ctx.logger.debug("Cold-queue sweep: skipping — target already woken this sweep", {
-                event: "cold_queue_skip_target_woken",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                wakeTargetId,
-              });
-              skipped++; continue;
-            }
-            const now = Date.now();
-            const existingTs = (coldQueueSweepTracker.get(issue.id) ?? []).filter(
-              (ts) => now - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS,
-            );
-            if (existingTs.length >= COLD_QUEUE_CIRCUIT_BREAKER_THRESHOLD) {
-              ctx.logger.warn("Cold-queue sweep: circuit breaker — skipping repeatedly dispatched issue", {
-                event: "cold_queue_circuit_breaker",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                recentAttempts: existingTs.length,
-              });
-              skipped++; continue;
-            }
-            try {
-              const wakeRes = await apiFetch(
-                `${PAPERCLIP_API}/api/agents/${wakeTargetId}/wakeup`,
-                {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ reason: "cold_queue_dispatch" }),
-                },
-              );
-              if (wakeRes.ok) {
-                dispatched++;
-                agentsWokenThisSweep.add(wakeTargetId);
-                existingTs.push(now);
-                coldQueueSweepTracker.set(issue.id, existingTs);
-                ctx.logger.info("Cold-queue sweep: dispatched wakeup for cold assigned issue", {
-                  event: "cold_queue_dispatched",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  assigneeAgentId,
-                  agentStatus: agentStatus ?? "unknown",
-                  wakeTargetId,
-                  dispatcherActive: !!dispatcherId,
-                });
-              } else {
-                const errBody = await wakeRes.text();
-                ctx.logger.warn("Cold-queue sweep: wakeup failed", {
-                  event: "cold_queue_wakeup_failed",
-                  issueId: issue.id,
-                  identifier: issue.identifier,
-                  wakeTargetId,
-                  status: wakeRes.status,
-                  body: errBody,
-                });
-              }
-            } catch (err) {
-              ctx.logger.warn("Cold-queue sweep: error sending wakeup", {
-                event: "cold_queue_wakeup_error",
-                issueId: issue.id,
-                identifier: issue.identifier,
-                wakeTargetId,
-                error: String(err),
-              });
-            }
-          }
-          ctx.logger.info("Cold-queue sweep completed for company", {
-            event: "cold_queue_sweep_done",
-            companyId,
-            totalIssues: issues.length,
-            dispatched,
-            skipped,
-          });
-        } catch (err) {
-          ctx.logger.warn("Cold-queue sweep: error scanning company", {
-            companyId,
-            error: String(err),
-          });
-        }
-      }
-    }
+    // Issue onboarding sweep (AGE-216 workaround — reactive events not delivered by host)
+    // First run after 30s so routing config is confirmed loaded, then every 5 min.
+    const onboardingInitial = setTimeout(() => {
+      void sweepIssueOnboarding();
+    }, 30_000);
+    if (onboardingInitial.unref) onboardingInitial.unref();
 
-
-    // ---------------------------------------------------------------------------
-    // Approval-wake sweep
-    // Scans in_review issues and wakes the approver for any stuck at the approval
-    // stage. Uses a two-step clear/re-assign so wakeOnDemand fires even when the
-    // approver was already the assignee. Deduped per-issue with a 10-minute window.
-    // ---------------------------------------------------------------------------
-    async function sweepPendingApprovals() {
-      for (const [companyId, companyCfg] of Object.entries(routingConfig.companies)) {
-        const approverAgentId = getAgentId(companyId, "approver");
-        if (!approverAgentId) continue;
-
-        try {
-          const issuesRes = await apiFetch(
-            `${PAPERCLIP_API}/api/companies/${companyId}/issues?status=in_review&limit=200`,
-          );
-          if (!issuesRes.ok) continue;
-          const issues: any[] = await issuesRes.json();
-          if (!Array.isArray(issues)) continue;
-
-          for (const issue of issues) {
-            const issueId = issue.id;
-            const identifier = issue.identifier ?? issueId;
-
-            try {
-              // Dedup: skip if woken recently
-              const lastWake = approvalWakeTracker.get(issueId) ?? 0;
-              if (Date.now() - lastWake < APPROVAL_WAKE_DEDUP_MS) continue;
-
-              // Fetch full issue to get executionState (not included in list response)
-              const fullRes = await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`);
-              if (!fullRes.ok) continue;
-              const full = await fullRes.json();
-
-              const stageType = full?.executionState?.currentStageType;
-              const participantId = full?.executionState?.currentParticipant?.agentId;
-
-              if (stageType !== "approval" || participantId !== approverAgentId) continue;
-
-              // Skip if there's an active run — don't disturb mid-execution
-              if (full?.activeRun || full?.executionLockedAt) continue;
-
-              // Two-step clear/re-assign to force wakeOnDemand
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ assigneeAgentId: null }),
-              });
-              await apiFetch(`${PAPERCLIP_API}/api/issues/${issueId}`, {
-                method: "PATCH",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ assigneeAgentId: approverAgentId }),
-              });
-
-              approvalWakeTracker.set(issueId, Date.now());
-              ctx.logger.info("Approval-wake sweep: woke approver for pending approval", {
-                issueId,
-                identifier,
-                approverAgentId,
-              });
-            } catch (err) {
-              ctx.logger.warn("Approval-wake sweep: error processing issue", {
-                issueId,
-                identifier,
-                error: String(err),
-              });
-            }
-          }
-        } catch (err) {
-          ctx.logger.warn("Approval-wake sweep: error scanning company", {
-            companyId,
-            error: String(err),
-          });
-        }
-      }
-
-      // Prune stale dedup entries
-      for (const [id, ts] of approvalWakeTracker) {
-        if (Date.now() - ts >= APPROVAL_WAKE_DEDUP_MS) approvalWakeTracker.delete(id);
-      }
-    }
-
+    const onboardingInterval = setInterval(() => {
+      void sweepIssueOnboarding();
+    }, ONBOARDING_SWEEP_INTERVAL_MS);
+    if (onboardingInterval.unref) onboardingInterval.unref();
 
     // Cold-queue recovery defense sweep (AGE-6413)
     const cqrInitial = setTimeout(() => {
@@ -4105,42 +5301,22 @@ This issue has been unblocked. Please review the rejection reason and revise you
     }, STALE_EXECUTION_LOCK_SWEEP_INTERVAL_MS);
     if (selInterval.unref) selInterval.unref();
 
+    // Cross-company assignment guard sweep (AGE-7010)
+    const xcaInitial = setTimeout(() => {
+      void sweepCrossCompanyAssignments();
+    }, 60_000);
+    if (xcaInitial.unref) xcaInitial.unref();
 
-    // Approval-wake sweep
-    const approvalWakeInitial = setTimeout(() => {
-      void sweepPendingApprovals();
-    }, 120_000);
-    if (approvalWakeInitial.unref) approvalWakeInitial.unref();
-
-    const approvalWakeInterval = setInterval(() => {
-      void sweepPendingApprovals();
-    }, APPROVAL_WAKE_SWEEP_INTERVAL_MS);
-    if (approvalWakeInterval.unref) approvalWakeInterval.unref();
-
-    // Cold-queue dispatch sweep (AGE-114)
-    const coldQueueInitial = setTimeout(() => {
-      void sweepColdQueue();
-    }, 45_000);
-    if (coldQueueInitial.unref) coldQueueInitial.unref();
-
-    const coldQueueInterval = setInterval(() => {
-      void sweepColdQueue();
-    }, COLD_QUEUE_SWEEP_INTERVAL_MS);
-    if (coldQueueInterval.unref) coldQueueInterval.unref();
+    const xcaInterval = setInterval(() => {
+      void sweepCrossCompanyAssignments();
+    }, XCA_SWEEP_INTERVAL_MS);
+    if (xcaInterval.unref) xcaInterval.unref();
 
     // AGE-7292: Periodic pruning of dispatch dedup tracker to prevent memory leaks.
     // Stale entries older than DISPATCH_DEDUP_WINDOW_MS are removed every minute.
     const dedupPruneInterval = setInterval(() => {
       pruneDispatchDedupTracker();
       pruneRecoveryRateTracker();
-      for (const [k, ts] of orchCompanyDedupTracker) {
-        if (Date.now() - ts >= ORCH_COMPANY_DEDUP_MS) orchCompanyDedupTracker.delete(k);
-      }
-      for (const [issueId, timestamps] of coldQueueSweepTracker) {
-        const filtered = timestamps.filter((ts) => Date.now() - ts < COLD_QUEUE_CIRCUIT_WINDOW_MS);
-        if (filtered.length === 0) coldQueueSweepTracker.delete(issueId);
-        else coldQueueSweepTracker.set(issueId, filtered);
-      }
     }, 60 * 1000);
     if (dedupPruneInterval.unref) dedupPruneInterval.unref();
 
