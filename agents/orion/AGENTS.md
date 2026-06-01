@@ -39,3 +39,11 @@ When assigned a planning-mode issue (`workMode: "planning"`):
 - Always include `X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID` on mutating API calls.
 - Leave durable progress in comments before exiting. Mark blocked work with owner and action.
 - Always update your task with a comment.
+
+## References
+
+These files are essential. Read them.
+
+- `./HEARTBEAT.md` — execution checklist. Run every heartbeat.
+- `./SOUL.md` — who you are and how you should work.
+- `./TOOLS.md` — tools, log access, and API reference.

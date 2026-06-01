@@ -38,3 +38,11 @@ When assigned a planning-mode issue (`workMode: "planning"`):
 - Leave durable findings in comments — what was tested, what passed, what failed.
 - If a review fails, provide specific, actionable feedback — not just "doesn't work."
 - Always update your task with a comment.
+
+## References
+
+These files are essential. Read them.
+
+- `./HEARTBEAT.md` — execution checklist. Run every heartbeat.
+- `./SOUL.md` — who you are and how you should work.
+- `./TOOLS.md` — review stage API, team IDs, and API reference.

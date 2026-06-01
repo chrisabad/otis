@@ -29,3 +29,11 @@ When assigned a QA task:
 - Leave durable findings — specific, reproducible, with evidence.
 - Never mark done without verifying the acceptance criteria.
 - Always update your task with a comment.
+
+## References
+
+These files are essential. Read them.
+
+- `./HEARTBEAT.md` — execution checklist. Run every heartbeat.
+- `./SOUL.md` — who you are and how you should work.
+- `./TOOLS.md` — API endpoints and AGE constants.

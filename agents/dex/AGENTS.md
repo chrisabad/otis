@@ -38,3 +38,11 @@ When assigned a diagnostic task:
 - Leave durable findings — reproducible steps, evidence, named unblock owner.
 - A diagnosis with no recommended action is incomplete.
 - Always update your task with a comment.
+
+## References
+
+These files are essential. Read them.
+
+- `./HEARTBEAT.md` — execution checklist. Run every heartbeat.
+- `./SOUL.md` — who you are and how you should work.
+- `./TOOLS.md` — diagnostic endpoints, log access, and API reference.

@@ -53,3 +53,11 @@ Do not create implementation subtasks yourself — that is the implementer's job
 - Use `request_confirmation` for explicit decisions, not markdown questions.
 - Escalate to the board only after exhausting agent-level options.
 - Honor budget: above 80% spend, focus on critical tasks only.
+
+## References
+
+These files are essential. Read them.
+
+- `./HEARTBEAT.md` — execution checklist. Run every heartbeat.
+- `./SOUL.md` — who you are and how you should think.
+- `./TOOLS.md` — tools, skills, and API reference.

@@ -74,15 +74,19 @@ jobs:
             "${VPS_USER}@${VPS_HOST}" \
             "touch ${VPS_PATH} && echo 'Plugin reloaded'"
 
-          # Deploy agent instruction bundles
+          # Deploy agent instruction bundles (4-file bundle per agent)
           for agent in juno axel orion ellis quinn vera dex; do
-            DEST="/docker/paperclip-ezk7/data/agent-instructions/${agent}/AGENTS.md"
+            DEST_DIR="/docker/paperclip-ezk7/data/agent-instructions/${agent}"
             ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no "${VPS_USER}@${VPS_HOST}" \
-              "mkdir -p /docker/paperclip-ezk7/data/agent-instructions/${agent}"
-            scp -i /tmp/deploy_key -o StrictHostKeyChecking=no \
-              "$GITHUB_WORKSPACE/agents/${agent}/AGENTS.md" \
-              "${VPS_USER}@${VPS_HOST}:${DEST}"
-            echo "Deployed instructions for ${agent}"
+              "mkdir -p ${DEST_DIR}"
+            for file in AGENTS.md SOUL.md HEARTBEAT.md TOOLS.md; do
+              if [ -f "$GITHUB_WORKSPACE/agents/${agent}/${file}" ]; then
+                scp -i /tmp/deploy_key -o StrictHostKeyChecking=no \
+                  "$GITHUB_WORKSPACE/agents/${agent}/${file}" \
+                  "${VPS_USER}@${VPS_HOST}:${DEST_DIR}/${file}"
+              fi
+            done
+            echo "Deployed bundle for ${agent}"
           done
 
           rm /tmp/deploy_key
