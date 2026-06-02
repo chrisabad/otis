@@ -4,6 +4,37 @@ Per `agentos-change` skill: every change to a covered file gets an entry here, B
 
 ---
 
+### 2026-06-02 00:28 UTC (Juno gateway root-ownership fix)
+- **AGE Issue**: `8d2ffb69` (Paperclip — "Juno: intermittent Honcho timeouts burn run budget")
+- **Type**: VPS system config — systemd service migration + OS user creation
+- **Root cause**: The hermes package auto-upgraded at 22:15 UTC on 2026-06-01. The running gateway (root user-level systemd unit) detected the version change, rewrote its own service definition, and restarted — all as root. This caused `config.yaml`, `channel_directory.json`, gateway lock/pid/state files, and two skill SKILL.md files to be written as `root:root 600`. Paperclip (UID 1000) couldn't read `config.yaml` → `adapter_failed` on every Juno run.
+- **Changes**:
+  1. **`/etc/passwd` + `/etc/group`**: Added `paperclip:x:1000:1000` — UID 1000 had no named entry, which blocked `User=1000` in systemd units.
+  2. **`/etc/systemd/system/hermes-gateway.service`** (new system-level unit): Installed via `hermes gateway install --system --run-as-user paperclip`. Replaces the root user-level unit at `/root/.config/systemd/user/hermes-gateway.service` (deleted). Key difference: `User=paperclip` + `Group=paperclip` ensures all files written by the gateway are owned by UID 1000, not root. Hermes's own auto-upgrade code reads `User=` from the system unit and preserves it on future package upgrades — making this durable.
+  3. **`/opt/hermes-profiles/juno/` file ownership**: `chown paperclip:paperclip` applied to all root-owned files (`config.yaml`, `channel_directory.json`, gateway lock/pid/state, cached PDFs/images). Also fixed two skill files in `/opt/hermes-profiles/shared/skills/productivity/`: `legal-document-review/SKILL.md` and `performance-reviews/SKILL.md`.
+- **Files on VPS**:
+  - `/etc/passwd`, `/etc/group`
+  - `/etc/systemd/system/hermes-gateway.service` (created)
+  - `/root/.config/systemd/user/hermes-gateway.service` (deleted)
+  - `/opt/hermes-profiles/juno/honcho.json` (see entry below)
+  - `/opt/hermes-profiles/juno/` (ownership fixes, various files)
+  - `/opt/hermes-profiles/shared/skills/productivity/legal-document-review/` (ownership fix)
+  - `/opt/hermes-profiles/shared/skills/productivity/performance-reviews/SKILL.md` (ownership fix)
+- **Restart**: Gateway restarted as part of service migration. Juno confirmed completing clean runs post-fix.
+- **Result**: Juno runs completing successfully. Gateway writes all new files as `paperclip:paperclip`.
+
+---
+
+### 2026-06-02 00:50 UTC (Juno honcho.json — timeout cap)
+- **AGE Issue**: `8d2ffb69` (Paperclip — "Juno: intermittent Honcho timeouts burn run budget")
+- **Type**: Runtime config — `/opt/hermes-profiles/juno/honcho.json`
+- **Change**: Added `"timeout": 10` (seconds) to cap per-call Honcho HTTP timeout. Default was `_DEFAULT_HTTP_TIMEOUT = 30.0s` in the hermes Honcho plugin. During the first post-fix wakeup run (00:35 UTC), 5 sequential Honcho init calls each hit the 30s timeout (add_peers, fetch context, MEMORY.md upload, USER.md upload, dialectic query) — burning 150s of the 600s adapter budget before any real work. Run timed out. With `timeout: 10`, worst-case startup burn is ~50s instead of 150s.
+- **Files**: `/opt/hermes-profiles/juno/honcho.json`
+- **Restart needed**: No — loaded fresh on each agent session.
+- **Follow-up**: Issue `8d2ffb69` tracks root cause investigation (intermittent Honcho slowness, possible rate-limit contention on shared Agentos workspace key, whether other agents need same treatment).
+
+---
+
 ### 2026-05-18 (Chrome WebAudio leak fix)
 - **AGE Issue**: AGE-14994 (uuid `6428e0f6-0152-4506-ae10-2e969b64019c`)
 - **Type**: Config — agentos-config + immediate live patch
