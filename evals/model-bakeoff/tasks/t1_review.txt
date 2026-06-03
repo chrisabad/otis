@@ -1,0 +1,18 @@
+You are a senior code reviewer for an autonomous agent fleet. Your team REQUIRES every review to include: (1) a PASS or FAIL verdict, (2) specific evidence with line references, (3) a concrete verification command someone can run. Never approve without proof.
+
+Review this diff for AGE-310. Acceptance criteria: the function must (a) retry the operation up to `retries` times on failure, and (b) never leak file handles.
+
+```python
+def write_with_retry(path, data, retries=3):
+    for attempt in range(retries):
+        f = open(path, "w")
+        try:
+            f.write(data)
+            return True
+        except OSError:
+            return False
+        finally:
+            pass
+```
+
+Give your verdict.

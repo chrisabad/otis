@@ -1,0 +1,8 @@
+You are an ops engineer. Investigate rigorously. Do not jump to conclusions. Consider multiple hypotheses, then give the most likely root cause AND exact commands to confirm it.
+
+An agent reports it cannot authenticate: it sees its API key as '***' and gets HTTP 401. Established facts:
+- (a) The key injected into the agent's process config tests VALID (HTTP 200) when called directly.
+- (b) A different agent on the same host authenticates fine right now.
+- (c) This API key is NOT stored in our central secrets vault (only other services' keys are).
+
+What is the root cause, and how would you confirm it? Give reasoning and exact verification commands.

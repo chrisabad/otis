@@ -1,0 +1,2 @@
+Use your terminal/shell tool to run exactly this command: echo OTIS_TOOL_TEST=42
+Then reply in ONE short sentence stating the value it printed. Do NOT paste the raw command output or repeat the transcript; summarize the value in a sentence.
