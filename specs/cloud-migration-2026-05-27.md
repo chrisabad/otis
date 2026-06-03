@@ -1,5 +1,7 @@
 # AgentOS Cloud Migration & Local Footprint Reduction
-**Spec v1.2 — 2026-05-27 — Author: Otis**
+**Spec v1.3 — 2026-06-03 — Author: Otis**
+
+> **v1.3 reframe (2026-06-03):** The new system is **already live** and **AGE is migrated and running on it** (Phase 0 done, Phase 1 substantially done). This is no longer a "build-in-parallel" plan — it is now an **onboard-additional-businesses-onto-the-live-system** plan. The next businesses are **FON (Font Replacer)** and **PER (Personal)**. Before onboarding them, a set of **reliability learnings from running AGE in production** must be addressed (see §3.5 Per-Business Onboarding Readiness Gate) — otherwise each new business inherits the same phantom-completion and cascade fragility we hit with AGE. KAL/WEE/PIX/STU/DIA remain deferred.
 
 ## 1. Goal
 
@@ -8,7 +10,22 @@ Move stateful AgentOS infrastructure off the laptop (currently ~11.6 GB local RA
 - Reduce ongoing maintenance overhead by adopting managed services
 - Start fresh with only the businesses we actively run today
 
-**End state:** ~1.5 GB Hermes agents stay local, everything else cloud-hosted or decommissioned, ~$20/mo cloud spend, only AGE and FON businesses on the new system.
+**End state:** ~1.5 GB Hermes agents stay local, everything else cloud-hosted or decommissioned, ~$20/mo cloud spend, **AGE + FON + PER** businesses on the new system.
+
+## 1.5 Current State (2026-06-03)
+
+The new Paperclip stack is **operational on Hostinger** and AGE runs on it today.
+
+| Item | State |
+|---|---|
+| Hostinger Paperclip (`paperclip-ezk7.srv1710374.hstgr.cloud`) + embedded postgres | **LIVE** (Phase 0 done) |
+| AGE company on new system | **LIVE** — 8 agents, 352 issues, executing autonomously |
+| AWS Secrets Manager backend | In use (note: some Paperclip `pcp_` keys injected via adapterConfig, not AWS — see memory) |
+| Langfuse observability plugin | **DISABLED fleet-wide** — was the sole real crash cause (`adapter_failed`); re-enable blocked on fail-open fix (AGE-354) |
+| Execution-policy gate (anti-phantom-completion) | **Working for AGE** (patch 053 + company `default_execution_policy`), verified live |
+| FON / PER companies | **Not yet created** |
+
+**Implication:** the heavy lift (provision + AGE migration) is done. Remaining work splits into two tracks: **(A) reliability hardening** (productionizing what we learned running AGE) and **(B) onboarding FON + PER**. Track A gates Track B.
 
 ## 2. Strategic Approach: Parallel Build, Then Cutover
 
@@ -23,14 +40,16 @@ Rationale:
 ## 3. Scope
 
 **In scope:**
-1. Provision new Paperclip 2026.525.0+ on Hostinger
-2. Set up AGE business with minimal active agents
-3. Set up FON business with the Plain customer-support pipeline
-4. Configure AWS Secrets Manager as Paperclip's secrets backend
-5. Configure Hermes credential pools for Ollama Cloud (multi-key, no LiteLLM)
-6. Migrate notification service to Hostinger (co-located)
-7. Decommission: LiteLLM, Graphiti/Neo4j/Embedding, Infisical
-8. Slack plan decision (likely downgrade to free)
+1. ~~Provision new Paperclip 2026.525.0+ on Hostinger~~ **(DONE)**
+2. ~~Set up AGE business with minimal active agents~~ **(DONE — live)**
+3. **Reliability hardening (Track A)** — productionize the learnings from running AGE so additional businesses don't inherit its fragility (see §3.5)
+4. Set up **FON** business with the Plain customer-support pipeline
+5. Set up **PER (Personal)** business *(pipeline/agents TBD — see Open Items)*
+6. Configure AWS Secrets Manager as Paperclip's secrets backend *(in use)*
+7. Configure Hermes credential pools for Ollama Cloud (multi-key, no LiteLLM)
+8. Migrate notification service to Hostinger (co-located)
+9. Decommission: LiteLLM, Graphiti/Neo4j/Embedding, Infisical
+10. Slack plan decision (likely downgrade to free)
 
 **Out of scope (deferred):**
 - KAL, PIX, STU, DIA, WEE businesses (none active enough to justify migration slot today)
@@ -39,6 +58,25 @@ Rationale:
 - Context layer (Zep / Mem0 / Iris) — defer until there's a real consumer
 - Migrating Hermes agents to cloud
 - Deep agent re-evaluation (which agents we actually need post-migration)
+
+## 3.5 Per-Business Onboarding Readiness Gate (learnings from running AGE, 2026-06-03)
+
+Running AGE in production surfaced reliability gaps that are **invisible with one business but multiply with each new one**. These MUST be closed before (or as part of) onboarding FON and PER — otherwise every new company starts phantom-vulnerable and cascade-prone. Full detail in `memory/project_phantom_gate_and_reliability.md`.
+
+**Gate items (block FON/PER onboarding):**
+
+| # | Item | Why it blocks expansion | Status / Ticket |
+|---|---|---|---|
+| G1 | **Automate per-tenant execution-policy gate provisioning** | New companies get **no** `default_execution_policy` by default → workers self-mark `done` unverified (phantom completion). Today it's a hand-run backfill script per company. Must be part of company creation/deploy, idempotent. | Manual today (`backfill-*-default-execution-policy.sh`); needs automation |
+| G2 | **Merge reviewer-rigor + anti-confabulation** | The gate only catches phantoms if reviewers *verify* instead of rubber-stamping, and agents stop fabricating "✅ done" claims. | **PR #162** (AGE-350/351/355) — open, needs merge |
+| G3 | **Cascade guardrails** | Recovery dumps a stranded agent's whole queue on the orchestrator (no load cap / domain check) → sprawl + mass phantom completions. Replicates per-tenant orchestrator. | **AGE-352** (keystone) — backlog |
+| G4 | **Shared-checkout isolation** | Agents commit feature branches into the shared deploy checkout (`/paperclip/repos/agentos-config`); a restart can then apply patches from a feature branch. More agents × more tenants = more collisions. | **AGE-353** — backlog (manually remediated 2026-06-03) |
+| G5 | **Langfuse fail-open** | Observability plugin crashed every model (`adapter_failed`); currently disabled fleet-wide. Re-enabling without fail-open would re-crash a multi-tenant fleet. | **AGE-354** — backlog |
+| G6 | **Per-business provisioning runbook** | Repeatable "stand up a new Paperclip business safely" checklist (company → gate → agents → secrets → routines → verify). Does not exist yet. | TODO |
+
+**Worker ≠ approver invariant:** when onboarding agents, never let an issue's assignee (worker) equal its approval-stage agent — that makes the gate a self-rubber-stamp. Bake this into the per-business policy template.
+
+**Recommended sequencing:** close G1–G2 (the phantom-completion floor) and write G6 → **pilot FON** as the first real exercise of the runbook under close watch → fix G3/G4/G5 in parallel → then **PER** → then broader expansion (KAL/WEE/etc.).
 
 ## 4. Target Architecture
 
@@ -78,6 +116,11 @@ Rationale:
 | Agent | Role | Decision |
 |---|---|---|
 | Piper | Plain webhook handler / FON customer support | Bring forward (confirm wiring during Phase 2 — Plain handler currently lives in pending PR #148 / FON-1442, not yet merged into smart-webhook-proxy) |
+
+### PER (Personal)
+| Agent | Role | Decision |
+|---|---|---|
+| *TBD* | *Personal-business agents + pipeline not yet specified* | **Open item** — define PER's agent roster, triggers, and pipeline before Phase 2b |
 
 ### Defer/skip
 - All WEE agents (Tate, Iris, Joss, WEE Juno)
@@ -124,7 +167,7 @@ Rationale:
    - Mint per-agent secrets in AWS Secrets Manager (Paperclip API keys, Ollama keys, etc.)
    - Create new Hermes profile pointing at new Paperclip URL
    - Configure Hermes credential pool for Ollama Cloud (×2 accounts, `least_used` strategy)
-   - Enable Hermes Langfuse plugin
+   - ~~Enable Hermes Langfuse plugin~~ **DEFER — Langfuse plugin currently disabled fleet-wide (crash cause). Do NOT enable until AGE-354 fail-open lands (gate item G5).**
    - Start as a SECOND Hermes process (not replacing the old one yet)
 3. Create one test AGE issue, assign to test agent, verify end-to-end
 4. Cron routines / scheduled tasks: recreate the ones we still want
@@ -133,21 +176,25 @@ Rationale:
 
 **Rollback:** Disable new-side Hermes agents; old setup keeps running undisturbed.
 
-### Phase 2 — FON business setup
-**Risk: LOW. Reversible: HIGH. No disruption. Estimated: 1 day.**
+### Phase 2 — FON + PER business onboarding
+**Risk: LOW. Reversible: HIGH. No disruption. Estimated: 1 day per business.**
 
-**Prerequisites:** Phase 1 complete. FON agent ownership confirmed.
+**Prerequisites:** Phase 1 complete **AND Readiness Gate §3.5 items G1, G2, G6 closed** (gate auto-provisioning + reviewer-rigor merged + runbook written). FON agent ownership confirmed; PER roster/pipeline defined.
 
-**Actions:**
-1. Create FON company in new Paperclip
-2. Create FON agent records + secrets (same pattern as AGE)
+**Phase 2a — FON (first runbook exercise, close watch):**
+1. Create FON company in new Paperclip → **verify it auto-inherits the execution-policy gate (G1)**; confirm worker≠approver template
+2. Create FON agent records + secrets (same pattern as AGE; Langfuse stays off per G5)
 3. Repoint Plain webhook → new Paperclip's webhook endpoint
 4. Verify Plain customer-support flow end-to-end with a test ticket
 5. Recreate FON cron routines
+6. **Watch for phantom completions / cascade behavior** — FON is the pilot that proves the runbook + the hardening
 
-**Verification:** FON agents respond to Plain tickets via new infrastructure. End-to-end SLA targets met.
+**Phase 2b — PER (after FON validates):**
+1. Same pattern, once PER's roster/pipeline is defined (Open Item)
 
-**Rollback:** Repoint Plain webhook back to old setup.
+**Verification:** FON/PER agents respond via new infra; new companies inherit the gate automatically; no phantom completions; orchestrator does not sprawl. End-to-end SLA targets met.
+
+**Rollback:** Repoint Plain webhook back to old setup; new companies are additive/isolated.
 
 ### Phase 3 — Notification service migration
 **Risk: LOW. Reversible: HIGH. No disruption. Estimated: 0.5 day.**
@@ -267,25 +314,29 @@ Evaluate after at least 1 week on new setup:
 
 ## 9. Acceptance Criteria
 
-- [ ] Phase 0 complete: Hostinger Paperclip live with AWS Secrets Manager backend
-- [ ] Phase 1 complete: AGE agents on new system, end-to-end tested
-- [ ] Phase 2 complete: FON agents on new system, Plain webhook flowing
+- [x] Phase 0 complete: Hostinger Paperclip live with AWS Secrets Manager backend
+- [x] Phase 1 complete: AGE agents on new system, executing autonomously *(end-to-end validated in production)*
+- [ ] **Readiness Gate §3.5 closed (G1–G6)** — gate auto-provisioning, PR #162 merged, AGE-352/353/354, runbook
+- [ ] Phase 2a complete: FON agents on new system, Plain webhook flowing, **gate auto-inherited, no phantom completions**
+- [ ] Phase 2b complete: PER onboarded (roster/pipeline defined first)
 - [ ] Phase 3 complete: Notification service migrated
 - [ ] Phase 4 complete: 1 week of stable parallel operation
 - [ ] Phase 5 complete: Cutover successful, Chris talking to new-Paperclip Juno via Slack
 - [ ] Phase 6 complete: Free RAM > 4 GB sustained for 24h
 - [ ] Phase 7 complete: Slack plan decision documented
-- [ ] No 401s in any agent logs for 24h post-cutover
-- [ ] Langfuse traces flowing for ≥ 3 agents
+- [ ] **Zero `adapter_failed`** across the fleet for 24h *(replaces the disproven "no 401s" criterion — there is no auth/401 bug; the real failure mode was the Langfuse crash)*
+- [ ] **No phantom completions** and **no orchestrator cascade sprawl** during a multi-business validation window
+- [ ] Langfuse traces flowing for ≥ 3 agents *(blocked on AGE-354 fail-open; deferred — not a cutover blocker)*
 - [ ] Old infrastructure data archived and verified restorable
 
 ## 10. Open Items
 
-1. **FON agent ownership** — who handles Plain webhook today? Needed for Phase 2.
-2. **AWS account** — existing or new? Determines IAM setup.
-3. **Tailnet topology** — confirm Hostinger box can join Chris's existing Tailnet.
-4. **Slack volume estimate** — current message count to inform Phase 7 decision.
-5. **Hostinger Paperclip one-click version** — verify it ships 2026.525.0+ before Phase 0.
+1. **PER (Personal) definition** — agent roster, triggers, and pipeline are unspecified. Needed before Phase 2b.
+2. **FON agent ownership / Piper wiring** — confirm Plain handler (PR #148 / FON-1442) before Phase 2a.
+3. **Gate auto-provisioning (G1)** — decide implementation: hook the backfill into company-creation, or a deploy-time `ensure` over all companies. Today it's manual per company.
+4. **Per-business runbook (G6)** — author it; FON is the first real exercise.
+5. **Slack volume estimate** — current message count to inform Phase 8 decision.
+6. ~~AWS account~~ / ~~Tailnet topology~~ / ~~Hostinger one-click version~~ — **resolved** (Phase 0 complete on the live box).
 
 ## 11. Tracking & Change Log
 
@@ -295,18 +346,21 @@ This spec file IS the project tracker until new Paperclip is operational. Each p
 
 | Phase | Status | Date | Notes |
 |---|---|---|---|
-| 0 — Provision new Paperclip | Not started | | |
-| 1 — AGE setup | Not started | | |
-| 2 — FON setup | Not started | | Piper confirmation needed |
+| 0 — Provision new Paperclip | **DONE** | ~2026-06 | Hostinger `paperclip-ezk7`, embedded postgres, AWS SM backend |
+| 1 — AGE setup | **DONE (live)** | 2026-06 | 8 agents, 352 issues, executing autonomously |
+| **3.5 — Reliability Readiness Gate (G1–G6)** | **In progress** | 2026-06-03 | Gates Phase 2. PR #162 open; AGE-352/353/354 backlog; gate auto-provisioning + runbook TODO |
+| 2a — FON onboarding | Not started | | Blocked on G1/G2/G6; Piper confirmation needed |
+| 2b — PER onboarding | Not started | | Blocked on PER roster/pipeline definition |
 | 3 — Notification service migration | Not started | | |
 | 4 — Validation (1 week parallel) | Not started | | |
 | 5 — Cutover | Not started | | |
 | 6 — Decommission old setup | Not started | | |
-| 7 — agentos-docs rewrite | Not started | | |
+| 7 — agentos-docs rewrite | Partially done | 2026-06 | docker/overview/infrastructure docs already corrected to current topology |
 | 8 — Slack plan decision | Not started | | |
 
 ### Change Log
 
+- **v1.3 (2026-06-03)** — Reframe: new system live, AGE migrated; plan is now onboard-onto-live, not build-in-parallel. Added **PER** as a target business alongside FON. Added **§1.5 Current State** and **§3.5 Per-Business Onboarding Readiness Gate** capturing production learnings from running AGE (execution-policy gate / phantom completion, reviewer-rigor PR #162, cascade AGE-352, shared-checkout AGE-353, Langfuse disable AGE-354, worker≠approver invariant, per-business runbook). Corrected stale items: Langfuse plugin now DEFERRED (was "enable"), acceptance criterion "no 401s" replaced with "zero adapter_failed + no phantom completions" (the 401 theory was disproven confabulation). Phase 2 split into 2a (FON pilot) / 2b (PER).
 - **v1.2.1 (2026-05-27)** — Piper identified as presumed FON owner (verify in Phase 2). Added Phase 7: agentos-docs rewrite (the docs describe deprecated topology and must be updated post-cutover).
 - **v1.2 (2026-05-27)** — Greenfield approach: parallel build instead of in-place migration. AGE + FON only. Open WebUI dropped (Slack covers both jobs). Notification service co-located on Hostinger.
 - **v1.1 (2026-05-27)** — Hermes credential pools confirmed; LiteLLM elimination clean. AWS Secrets Manager via Paperclip native (requires upgrade to 2026.525+).
