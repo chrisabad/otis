@@ -4,6 +4,23 @@ Per `agentos-change` skill: every change to a covered file gets an entry here, B
 
 ---
 
+### 2026-06-03 (Fleet LLM model swap — tool-echo fix + two-tier assignment)
+- **AGE Issue**: AGE-295 (diagnose/fix Juno/Quinn echoing tool results in run logs)
+- **Type**: Config — Paperclip agent `adapterConfig.model` (per-agent, via API). NOT agentos-config-managed.
+- **Problem**: Juno/Quinn (`minimax-m2.5:cloud`) echoed tool results / stalled in-harness. Root cause is NOT a proxy (LiteLLM decommissioned 2026-05-27) and NOT raw model incapability — the failure is unparsed tool-call/result text under the Hermes harness on the MiniMax/GLM model family. Reproduced live (deepseek-v3.2 leaks tool-call XML as text) + upstream Ollama issue #16389 (minimax-m3, our exact Hermes→Ollama-Cloud pipeline; names DeepSeek/Qwen as working alternatives).
+- **Change**: Fleet moved off the minimax/glm-echo family. Final state = two tiers by role:
+  - HEAVY `glm-5.1`: Juno, Quinn, Ellis (reviewers/orchestrator — reasoning-critical)
+  - LIGHT `gpt-oss:20b`: Axel, Vera, Orion, Dex
+  - (Interim: whole fleet briefly on `qwen3-coder-next:cloud`; DEPRECATED — coder model rewrites code instead of reviewing it, returns empty on open-ended investigation, drops explicit instructions.)
+- **Evidence**: real-harness eval — `hermes chat -m <model>` on the VPS via SSH, NOT direct Ollama API (direct API was actively misleading: qwen3-coder-next "passed" on API, failed in-harness). 6 heavy + 5 light candidates × 4 rigor tasks (review w/ planted bugs, root-cause investigation, instruction-following, confabulation trap) + tool round-trip. glm-5.1 best quality+speed of heavies (clean 4/4, ~125s); gpt-oss:20b best light (clean 4/4, ~35s, OpenAI-origin so no CJK token bleed). qwen3-coder-next failed 3/4 in-harness.
+- **Mechanism**: model lives in Paperclip `adapterConfig.model`, passed to hermes as the `-m` CLI arg (authoritative over profile `config.yaml`). Hermes → Ollama Cloud via `https://ollama.com/v1`. hermes bin `/opt/hermes-venv/bin/hermes`, profiles `/opt/hermes-profiles/<agent>`.
+- **Restart needed**: No — picked up on next run. Fleet was paused for the swap, then resumed via `POST /api/agents/<id>/resume`.
+- **Verification (live, post-swap)**: Quinn (glm-5.1) ran a rigorous command-backed re-review (grep + `npm run build`, flipped a stale PASS→FAIL); Axel/Orion (gpt-oss:20b) clean fast runs; Ellis/Juno clean. No echo, no empty/stall, no recovery storm.
+- **Watch items**: Juno glm-5.1 runtime under concurrent load (fallback: gpt-oss:120b or gpt-oss:20b); `Dex` has no `/opt/hermes-wrappers/dex.sh` so its model config is cosmetic until a wrapper exists; AGE-284 re-FAIL verdict needs implementer confirmation (possible over-literal grep string).
+- **Drift risk**: LOW — agent model is Paperclip-DB-authoritative (via `-m`); agentos-config profile configs do not drive it.
+
+---
+
 ### 2026-06-02 00:28 UTC (Juno gateway root-ownership fix)
 - **AGE Issue**: `8d2ffb69` (Paperclip — "Juno: intermittent Honcho timeouts burn run budget")
 - **Type**: VPS system config — systemd service migration + OS user creation
