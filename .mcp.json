@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "honcho": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.honcho.dev",
+        "--header",
+        "Authorization:Bearer ${HONCHO_API_KEY}",
+        "--header",
+        "X-Honcho-User-Name:Otis",
+        "--header",
+        "X-Honcho-Workspace-ID:Agentos"
+      ],
+      "env": {}
+    }
+  }
+}

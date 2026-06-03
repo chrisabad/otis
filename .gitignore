@@ -6,8 +6,10 @@ scratch/
 *.json
 !config.yaml
 !plugins/**/*.json
+!.mcp.json
 [object Object]/
 .pytest_cache/
-.claude/
+.claude/*
+!.claude/settings.json
 __pycache__/
 *.pyc
