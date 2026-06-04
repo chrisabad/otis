@@ -112,23 +112,24 @@ Two identities run the whole loop — and they must be **distinct**:
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
 | AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
-| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno | **new agent** (to create) | Tess (`qa`, chrisabad PAT) | — | 🟡 shell created; agents blocked on input |
+| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno (shared) | Roe (`cto`, Roe Bot FON App) | Tess (`qa`, chrisabad PAT) | — | 🟡 shell created; awaiting Roe App creds |
 | PER | TBD | Juno | unknown | (chrisabad PAT) | — | deferred (incomplete roster: implementer unknown, Ren in error) |
 
 ### FON provisioning checklist (shell live, agents pending)
-Company `029fb83c` exists (0 agents). Final roster per Chris's clarification (Piper = CS agent, **not** implementer; FON needs a **separate** CTO):
-- **orchestrator/ceo:** Juno — never a worker
-- **implementer/cto:** ⛔ **NEW agent to create** — needs a GitHub App identity (clone `axel-agentos` pattern: App authors/opens every PR)
-- **reviewer + approver/qa:** Tess — posts PASS verdict; **chrisabad PAT** approves+merges
-- **dispatcher:** Reed
-- **CS (no routing role):** Piper — Plain→Piper pipeline (specifics TBD)
+Company `029fb83c` exists (0 agents). Roster = AGE minimal 3-role template (orchestrator doubles as dispatcher — **no separate dispatcher**) + one justified extra (dedicated CS agent):
+- **ceo / orchestrator + dispatcher:** Juno (**shared** — referenced by existing agent ID in routing-rules; never a worker)
+- **cto / implementer:** Roe — authors PRs via existing **Roe Bot (FON)** App; model `gpt-oss:20b`
+- **qa / reviewer + approver:** Tess — posts PASS verdict; **chrisabad PAT** approves+merges; model `glm-5.1`
+- **CS (dedicated role):** Piper — Plain→Piper pipeline (specifics TBD)
+- ~~Reed (dispatcher)~~ — **dropped**; orchestrator covers dispatch, matching AGE
+
+GitHub Apps already exist (no new Apps needed): `axel-agentos` (3590440), `otis-age` (3927680), plus per-agent Apps incl. **Roe Bot (FON)**, **Tess Bot (FON)**. Only the implementer's App (Roe) is on the gate's critical path.
 
 **Blocked on input before agents can be provisioned:**
-1. **GitHub App for the new CTO/implementer** — create the App (or authorize reuse), get App ID + installation ID + private key → AWS SM `agentos/<cto>/github_app`.
-2. **Models** per agent (AGE uses Axel `gpt-oss:20b`, Juno/Ellis `glm-5.1`) — confirm FON equivalents.
-3. **Plain→Piper CS pipeline** specifics (how Plain tickets reach Piper).
-4. Confirm whether Juno/Tess/Reed are net-new FON agents or shared identities.
+1. **Roe Bot (FON) App creds** — app_id + a freshly generated private key (PEM); installation_id derived via JWT. → AWS SM `agentos/roe/github_app`.
+2. **Plain→Piper CS pipeline** specifics (Plain auth, trigger direction, ticket→issue mapping, reply path, existing old-machine config).
 
-Once 1–4 are in hand: create agents (clone AGE adapter_config: `hermes_local`, per-agent `PAPERCLIP_API_KEY`, `hermesCommand`, `claudeMd`), add FON entry to `routing-rules.json` (needs the real agent IDs), set the company review→approver execution-policy gate, then smoke-test (real code issue → PR→done; phantom blocked).
+Models are settled (clone AGE: Roe `gpt-oss:20b`, Tess `glm-5.1`, Juno `glm-5.1` shared).
+Once 1–2 are in hand: create Roe/Tess/Piper agent profiles (clone AGE adapter_config: `hermes_local`, per-agent `PAPERCLIP_API_KEY`, `hermesCommand`, `claudeMd`), add FON entry to `routing-rules.json` (orchestrator=Juno, dispatcher=Juno, implementer=Roe, reviewer=Tess, approver=Tess), set the company review→approver execution-policy gate, then smoke-test (real code issue → PR→done; phantom blocked).
 
 **Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges. Gate = GitHub merge + reviewer PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. **Cascade resolved (plugin v1.52.0, PR #61):** the non-functional orchestrator-deassign sweep (#58/#59) was reverted; the #57 event-driven reassignment guard + 24 tests retained. Reframed root finding: `issue.created/updated` **are** delivered to the plugin via `plugin-event-bus` (gate fires on status changes; execution policy auto-applies on create) — earlier "events not delivered" was wrong. Narrow open item: assignee-only changes don't trigger the #57 guard (deferred; gate holds regardless).
