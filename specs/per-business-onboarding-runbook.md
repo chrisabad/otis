@@ -112,7 +112,7 @@ Two identities run the whole loop — and they must be **distinct**:
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
 | AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
-| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno (shared) | Willa (`cto`, Willa Bot FON App) | Tess (`qa`, chrisabad PAT merges) | — | 🟡 shell created; awaiting Willa App creds + config-repo bring-up |
+| FON | `029fb83c-…` (prefix FON) | Juno (`16adddf5`, cloned profile) | Willa (`cto`, `2835530c`, willa-bot-fon App) | Tess (`qa`, `e105f216`, chrisabad PAT) | ✅ gate validated (phantom→in_review blocked; policy auto-applies) | 🟢 agents live + wired; happy-path blocked on AGE-384/385 |
 | PER | TBD | Juno | unknown | (chrisabad PAT) | — | deferred (incomplete roster: implementer unknown, Ren in error) |
 
 ### FON provisioning checklist (shell live, agents pending)
