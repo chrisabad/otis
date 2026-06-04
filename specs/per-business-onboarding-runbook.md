@@ -129,9 +129,9 @@ Two identities run the whole loop — and they must be **distinct**:
 - **Repo↔live config divergence:** every repo `config.yaml` (incl. Axel's) uses `model.default:"routine"` / `localhost:4000` / `${OPENAI_API_KEY}`, but live profiles (e.g. Axel) run `glm-5.1:cloud` via `ollama.com`. This is a **fleet-wide deploy transform/override**, not FON-specific — replicate the established bring-up step (owned with the Axel/Quinn config bots); do not hand-improvise.
 
 **Blocked on input:**
-1. **Willa Bot (FON) App creds** — app_id + fresh private key (PEM) → AWS SM `agentos/willa/github_app`. (This is the implementer/author identity. Roe Bot creds already stored at `agentos/roe/github_app` but Roe is OUT of the slim gate; chrisabad PAT does the merge.)
+1. ✅ **Willa Bot (FON) App** — DONE. `Roe Bot (FON)` renamed → `Willa Bot (FON)` (app 3663225, slug `willa-bot-fon`, installed on figma-plugin-font-replacer); creds re-keyed to AWS SM `agentos/willa/github_app`. Implementer/author identity ready.
 2. **Plain→Piper CS pipeline** specifics (trigger direction, ticket→issue mapping, reply path, old-machine config).
-3. Confirm the live-bring-up / LLM-config step used for AGE agents (so FON profiles point at Ollama Cloud, not the dead proxy).
+3. ✅ **agentos-config gitops** — DONE (PR #168). `deploy-hermes-profiles.yml` auto-deploys profile config+instructions to the VPS for live profiles. New-agent bring-up (profile dir + .env + wrapper + pcp key) is still a manual step the job intentionally skips.
 
 When unblocked: finalize Willa/Tess profiles live, create Paperclip records (Willa `cto`, Tess `qa`), add FON entry to `routing-rules.json` (orchestrator=Juno, dispatcher=Juno, implementer=Willa, reviewer=Tess, approver=Tess) → PR → deploy, set the company review→Tess execution-policy gate, then smoke-test in `chrisabad/figma-plugin-font-replacer` (real code issue → Willa PR → Tess PASS → done; phantom blocked).
 
