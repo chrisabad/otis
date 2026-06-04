@@ -112,24 +112,27 @@ Two identities run the whole loop — and they must be **distinct**:
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
 | AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
-| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno (shared) | Roe (`cto`, Roe Bot FON App) | Tess (`qa`, chrisabad PAT) | — | 🟡 shell created; awaiting Roe App creds |
+| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno (shared) | Willa (`cto`, Willa Bot FON App) | Tess (`qa`, chrisabad PAT merges) | — | 🟡 shell created; awaiting Willa App creds + config-repo bring-up |
 | PER | TBD | Juno | unknown | (chrisabad PAT) | — | deferred (incomplete roster: implementer unknown, Ren in error) |
 
 ### FON provisioning checklist (shell live, agents pending)
-Company `029fb83c` exists (0 agents). Roster = AGE minimal 3-role template (orchestrator doubles as dispatcher — **no separate dispatcher**) + one justified extra (dedicated CS agent):
-- **ceo / orchestrator + dispatcher:** Juno (**shared** — referenced by existing agent ID in routing-rules; never a worker)
-- **cto / implementer:** Roe — authors PRs via existing **Roe Bot (FON)** App; model `gpt-oss:20b`
-- **qa / reviewer + approver:** Tess — posts PASS verdict; **chrisabad PAT** approves+merges; model `glm-5.1`
-- **CS (dedicated role):** Piper — Plain→Piper pipeline (specifics TBD)
-- ~~Reed (dispatcher)~~ — **dropped**; orchestrator covers dispatch, matching AGE
+**⚠️ Lesson (2026-06-04): do NOT improvise the roster.** The canonical FON roster already exists in `chrisabad/agentos-config` (`hermes/profiles/<agent>/SOUL.md`), built across many AGE tickets: Willa=CTO, Tess=Reviewer, Roe=Approver, Piper=CS Lead, Arlo=CMO, Cass=CFO, Juno=CEO(shared). An earlier improvised guess (Roe=cto) was **wrong** and produced a bad Paperclip record (since terminated). **Always read the agentos-config profiles first.**
 
-GitHub Apps already exist (no new Apps needed): `axel-agentos` (3590440), `otis-age` (3927680), plus per-agent Apps incl. **Roe Bot (FON)**, **Tess Bot (FON)**. Only the implementer's App (Roe) is on the gate's critical path.
+**Slim FON dev roster (per Chris: leverage config profiles, but minimize + combine reviewer/approver like AGE):**
+- **ceo / orchestrator + dispatcher:** Juno (**shared** — escalation slot points to existing AGE Juno id; never a worker)
+- **cto / implementer:** **Willa** — authors PRs via **Willa Bot (FON)** App; canonical CTO ("owns the technical work")
+- **qa / reviewer + approver (combined):** **Tess** — wired to the Paperclip review stage, posts PASS verdict; **chrisabad PAT** approves+merges (AGE-identical)
+- **CS (dedicated role):** Piper — Plain→Piper pipeline (keys stored: `agentos/piper/plain_api_key`, `agentos/juno/plain_api_key`)
+- **Defined in config but OUT of the dev gate:** Roe (approver — absorbed into Tess), Arlo (CMO), Cass (CFO)
 
-**Blocked on input before agents can be provisioned:**
-1. **Roe Bot (FON) App creds** — app_id + a freshly generated private key (PEM); installation_id derived via JWT. → AWS SM `agentos/roe/github_app`.
-2. **Plain→Piper CS pipeline** specifics (Plain auth, trigger direction, ticket→issue mapping, reply path, existing old-machine config).
+**Provisioning path = through `agentos-config` (NOT hand-cloning /opt):** Willa/Tess/Piper already have `hermes/profiles/<agent>/` (SOUL.md + config.yaml). Bring-up = (a) make the live runtime profile + `/opt/hermes-wrappers/<agent>.sh` + Paperclip agent record; (b) the LLM-config caveat below.
+- **Repo↔live config divergence:** every repo `config.yaml` (incl. Axel's) uses `model.default:"routine"` / `localhost:4000` / `${OPENAI_API_KEY}`, but live profiles (e.g. Axel) run `glm-5.1:cloud` via `ollama.com`. This is a **fleet-wide deploy transform/override**, not FON-specific — replicate the established bring-up step (owned with the Axel/Quinn config bots); do not hand-improvise.
 
-Models are settled (clone AGE: Roe `gpt-oss:20b`, Tess `glm-5.1`, Juno `glm-5.1` shared).
-Once 1–2 are in hand: create Roe/Tess/Piper agent profiles (clone AGE adapter_config: `hermes_local`, per-agent `PAPERCLIP_API_KEY`, `hermesCommand`, `claudeMd`), add FON entry to `routing-rules.json` (orchestrator=Juno, dispatcher=Juno, implementer=Roe, reviewer=Tess, approver=Tess), set the company review→approver execution-policy gate, then smoke-test (real code issue → PR→done; phantom blocked).
+**Blocked on input:**
+1. **Willa Bot (FON) App creds** — app_id + fresh private key (PEM) → AWS SM `agentos/willa/github_app`. (This is the implementer/author identity. Roe Bot creds already stored at `agentos/roe/github_app` but Roe is OUT of the slim gate; chrisabad PAT does the merge.)
+2. **Plain→Piper CS pipeline** specifics (trigger direction, ticket→issue mapping, reply path, old-machine config).
+3. Confirm the live-bring-up / LLM-config step used for AGE agents (so FON profiles point at Ollama Cloud, not the dead proxy).
+
+When unblocked: finalize Willa/Tess profiles live, create Paperclip records (Willa `cto`, Tess `qa`), add FON entry to `routing-rules.json` (orchestrator=Juno, dispatcher=Juno, implementer=Willa, reviewer=Tess, approver=Tess) → PR → deploy, set the company review→Tess execution-policy gate, then smoke-test in `chrisabad/figma-plugin-font-replacer` (real code issue → Willa PR → Tess PASS → done; phantom blocked).
 
 **Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges. Gate = GitHub merge + reviewer PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. **Cascade resolved (plugin v1.52.0, PR #61):** the non-functional orchestrator-deassign sweep (#58/#59) was reverted; the #57 event-driven reassignment guard + 24 tests retained. Reframed root finding: `issue.created/updated` **are** delivered to the plugin via `plugin-event-bus` (gate fires on status changes; execution policy auto-applies on create) — earlier "events not delivered" was wrong. Narrow open item: assignee-only changes don't trigger the #57 guard (deferred; gate holds regardless).
