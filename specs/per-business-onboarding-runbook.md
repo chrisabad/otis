@@ -111,6 +111,10 @@ Two identities run the whole loop — and they must be **distinct**:
 ## Tracking
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
-| AGE | f4593f38-… | Juno | Axel (pending role flip) | Ellis (pending machine-user) | partial | ✅ |
+| AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
+| FON | TBD | TBD | TBD | (chrisabad PAT) | — | blocked on input |
+| PER | TBD | TBD | TBD | (chrisabad PAT) | — | deferred (needs scoping) |
+
+**Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges (dedicated machine-user demoted to optional). Gate = GitHub merge + Ellis PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. Residual: cascade still reassigns to Juno (AGE-352 guard gap — gate held regardless).
 | FON | TBD | | | | | Phase 2a |
 | PER | TBD | | | | | Phase 2b |
