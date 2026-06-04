@@ -112,9 +112,23 @@ Two identities run the whole loop — and they must be **distinct**:
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
 | AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
-| FON | TBD | TBD | TBD | (chrisabad PAT) | — | blocked on input |
-| PER | TBD | TBD | TBD | (chrisabad PAT) | — | deferred (needs scoping) |
+| FON | `029fb83c-3204-4fef-a90c-85a8e89ca49d` (prefix FON) | Juno | **new agent** (to create) | Tess (`qa`, chrisabad PAT) | — | 🟡 shell created; agents blocked on input |
+| PER | TBD | Juno | unknown | (chrisabad PAT) | — | deferred (incomplete roster: implementer unknown, Ren in error) |
 
-**Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges (dedicated machine-user demoted to optional). Gate = GitHub merge + Ellis PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. Residual: cascade still reassigns to Juno (AGE-352 guard gap — gate held regardless).
-| FON | TBD | | | | | Phase 2a |
-| PER | TBD | | | | | Phase 2b |
+### FON provisioning checklist (shell live, agents pending)
+Company `029fb83c` exists (0 agents). Final roster per Chris's clarification (Piper = CS agent, **not** implementer; FON needs a **separate** CTO):
+- **orchestrator/ceo:** Juno — never a worker
+- **implementer/cto:** ⛔ **NEW agent to create** — needs a GitHub App identity (clone `axel-agentos` pattern: App authors/opens every PR)
+- **reviewer + approver/qa:** Tess — posts PASS verdict; **chrisabad PAT** approves+merges
+- **dispatcher:** Reed
+- **CS (no routing role):** Piper — Plain→Piper pipeline (specifics TBD)
+
+**Blocked on input before agents can be provisioned:**
+1. **GitHub App for the new CTO/implementer** — create the App (or authorize reuse), get App ID + installation ID + private key → AWS SM `agentos/<cto>/github_app`.
+2. **Models** per agent (AGE uses Axel `gpt-oss:20b`, Juno/Ellis `glm-5.1`) — confirm FON equivalents.
+3. **Plain→Piper CS pipeline** specifics (how Plain tickets reach Piper).
+4. Confirm whether Juno/Tess/Reed are net-new FON agents or shared identities.
+
+Once 1–4 are in hand: create agents (clone AGE adapter_config: `hermes_local`, per-agent `PAPERCLIP_API_KEY`, `hermesCommand`, `claudeMd`), add FON entry to `routing-rules.json` (needs the real agent IDs), set the company review→approver execution-policy gate, then smoke-test (real code issue → PR→done; phantom blocked).
+
+**Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges. Gate = GitHub merge + reviewer PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. **Cascade resolved (plugin v1.52.0, PR #61):** the non-functional orchestrator-deassign sweep (#58/#59) was reverted; the #57 event-driven reassignment guard + 24 tests retained. Reframed root finding: `issue.created/updated` **are** delivered to the plugin via `plugin-event-bus` (gate fires on status changes; execution policy auto-applies on create) — earlier "events not delivered" was wrong. Narrow open item: assignee-only changes don't trigger the #57 guard (deferred; gate holds regardless).
