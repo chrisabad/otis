@@ -27,7 +27,7 @@ Native role enum, for reference: `ceo, cto, cmo, cfo, security, engineer, design
 ## 2. Invariants (the hard rules every business inherits)
 
 1. **Maker ≠ Approver.** The `cto` (implementer) never approves; the approver never implements.
-2. **Code `done` = merged PR.** GitHub is the gate; the plugin auto-sets `done` on merge. **No Paperclip approval stage.**
+2. **Code `done` requires a separate reviewer's PASS verdict** (Paperclip execution-policy `review` stage → reviewer approves). This enforces Maker ≠ Approver and blocks self-completion. ⚠️ **Known gap (AGE-392):** the verdict completes the issue but is **NOT** currently coupled to the GitHub PR merge — a reviewer who approves without merging yields `done` with an unmerged PR. Reviewers must merge **then** post the verdict; merge-before-done enforcement is pending. *(Corrects the earlier "merge alone = done, no Paperclip stage" model — the validated AGE/FON gate is the Paperclip review stage.)*
 3. **Recovery routes to the `cto`** (native) = the implementer — never to the `ceo`/approver. **Always have a `cto`** so recovery never falls through to the `ceo`.
 4. **The `ceo` (orchestrator) is never an issue assignee.**
 5. **Scale = more concurrent runs on the `cto`**, not more agents.
@@ -56,8 +56,8 @@ Two identities run the whole loop — and they must be **distinct**:
 
 ## 4. Gate model (one gate, the artifact)
 
-- **Code issues:** `in_progress` (cto) → PR opened → `in_review` → reviewer **approves + merges in GitHub** → plugin detects merge → **`done`**. No agent manually sets `done`; phantom completion is impossible (no merged PR → no `done`).
-- **Non-code issues** (decisions/ops/docs not via PR): lightweight — proof-of-work evidence + orchestrator marks `done`. No GitHub artifact, so no merge gate.
+- **Code issues:** `in_progress` (cto) → PR opened (implementer App authors) → `in_review` → **reviewer (qa) approves+merges the PR in GitHub AND posts a PASS verdict** on the Paperclip `review` stage → issue → **`done`**. The implementer cannot self-complete (separate approver required). ⚠️ **AGE-392 gap:** today the **PASS verdict alone** advances the issue to `done` — it is *not* coupled to the GitHub merge. So the reviewer MUST merge before posting the verdict (or you get `done` + unmerged PR). Validated on FON-1 (Willa PR → Tess verdict; merge was done manually). Merge-before-`done` enforcement (plugin guard checking the linked PR is merged before allowing the review stage to complete) is the AGE-392 fix.
+- **Non-code issues** (decisions/ops/docs not via PR): lightweight — proof-of-work evidence + reviewer/orchestrator verdict. No GitHub artifact.
 
 ---
 
