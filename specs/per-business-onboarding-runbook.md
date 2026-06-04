@@ -1,6 +1,6 @@
 # Per-Business Onboarding Runbook (Paperclip on Hostinger)
 
-**v2.0 — 2026-06-03 — Author: Otis**
+**v2.1 — 2026-06-03 — Author: Otis**
 
 How to stand up a new Paperclip business safely and minimally, using Paperclip's **native roles** so native routing/recovery work *for* us. Derived from production learnings running AGE (see `memory/project_phantom_gate_and_reliability.md` and Cloud Migration PRD §3.5).
 
@@ -32,15 +32,25 @@ Native role enum, for reference: `ceo, cto, cmo, cfo, security, engineer, design
 4. **The `ceo` (orchestrator) is never an issue assignee.**
 5. **Scale = more concurrent runs on the `cto`**, not more agents.
 6. **Routing = by role** (native Paperclip style): implementation/code → `cto`; triage/orchestration → `ceo`.
+7. **PR identity model:** the **implementer App authors/opens every PR**; the **approver PAT approves + merges**. **Chris never authors or approves** routine PRs. Because the App (bot) and the PAT (`chrisabad`) are *distinct* identities, there is no self-approval bind — as long as the **bot always *opens* the PR** (authorship is set by who opens it, not who pushed the branch).
 
 ---
 
-## 3. GitHub identities (what each role actually needs)
+## 3. GitHub identities (official model)
 
-- **Implementer (`cto`)** → **GitHub App** (push, open PRs). Apps *cannot approve* PRs — fine, the implementer doesn't approve.
-- **Reviewer/Approver** → **GitHub machine-USER + PAT** with write access. **GitHub Apps cannot submit PR approvals** — so this role must be a real user identity, not an App. This is the only role that requires a user.
-- **Orchestrator (`ceo`)** → none required (read/comment at most).
-- Not every agent needs a GitHub identity. Only the implementer (App) and approver (user).
+Two identities run the whole loop — and they must be **distinct**:
+
+- **Implementer (`cto`) → GitHub App.** Pushes work branches and **opens every PR** (author = bot). Apps *cannot approve* PRs — fine, the implementer doesn't approve.
+- **Reviewer/Approver (Ellis) → a user PAT** (currently **Chris's `chrisabad` fine-grained PAT**, stored in AWS SM `agentos/ellis/github_approver_pat`). It **approves + merges**. Apps can't approve, so this must be a user identity.
+- **Orchestrator (`ceo`) → none** (read/comment at most).
+
+**Accepted trade-offs of using Chris's PAT (vs a dedicated bot user):**
+- Approvals are attributed to **`chrisabad`** in GitHub history (can't distinguish auto-approval from a real human review). Accepted.
+- Keep it a **fine-grained** token (PR R/W, Contents R/W, **Workflows R/W**, only the agent repos) and rotate periodically — it lives on the VPS.
+
+**Workflow-file PRs** (`.github/workflows/*`): the App lacks `workflow` scope, so the **PAT pushes that branch**, but the **bot still opens the PR** (author = bot → PAT can still approve).
+
+> A **dedicated bot machine-user** as the approver is now an *optional* future nicety (cleaner audit trail), **not** a required step.
 
 ---
 
@@ -55,7 +65,7 @@ Native role enum, for reference: `ceo, cto, cmo, cfo, security, engineer, design
 
 1. **Create the company** (record `companyId`).
 2. **Create 3 agents** with native roles: `ceo` (orchestrator), `cto` (implementer), `qa` (reviewer/approver).
-3. **GitHub identities:** App for the `cto`; machine-USER + PAT for the approver; orchestrator none.
+3. **GitHub identities:** App for the `cto` (authors/opens PRs); the approver PAT (Chris's, in AWS SM) approves+merges; orchestrator none. The bot opens every PR; Chris never authors/approves.
 4. **Routing rules:** dispatch implementation/code by `role = cto`; triage/orchestration by `role = ceo`.
 5. **Verify invariants:** a `cto` exists; `ceo` is never an assignee; maker ≠ approver.
 6. **Smoke test:** create a throwaway issue, confirm it **cannot reach `done` without a merged PR**; cancel it.
