@@ -1,6 +1,6 @@
 # Per-Business Onboarding Runbook (Paperclip on Hostinger)
 
-**v2.1 — 2026-06-03 — Author: Otis**
+**v2.2 — 2026-06-04 — Author: Otis**
 
 How to stand up a new Paperclip business safely and minimally, using Paperclip's **native roles** so native routing/recovery work *for* us. Derived from production learnings running AGE (see `memory/project_phantom_gate_and_reliability.md` and Cloud Migration PRD §3.5).
 
@@ -27,7 +27,10 @@ Native role enum, for reference: `ceo, cto, cmo, cfo, security, engineer, design
 ## 2. Invariants (the hard rules every business inherits)
 
 1. **Maker ≠ Approver.** The `cto` (implementer) never approves; the approver never implements.
-2. **Code `done` requires a separate reviewer's PASS verdict** (Paperclip execution-policy `review` stage → reviewer approves). This enforces Maker ≠ Approver and blocks self-completion. ⚠️ **Known gap (AGE-392):** the verdict completes the issue but is **NOT** currently coupled to the GitHub PR merge — a reviewer who approves without merging yields `done` with an unmerged PR. Reviewers must merge **then** post the verdict; merge-before-done enforcement is pending. *(Corrects the earlier "merge alone = done, no Paperclip stage" model — the validated AGE/FON gate is the Paperclip review stage.)*
+2. **Code `done` requires a separate reviewer's PASS verdict AND a real merged-PR artifact** (Paperclip execution-policy `review` stage → reviewer approves). This enforces Maker ≠ Approver and blocks self-completion. **AGE-392 (the artifact gate) — two layers, both live:**
+   - **Plugin detection (deployed, plugin v1.59+):** before a CODE issue advances to `done`, the worker checks `hasCompletionArtifact` — a leaf issue must have a **MERGED** GitHub PR (verified via the GitHub API, App token); a planning parent must have **all subtasks `done`**. On failure it reverts to `in_progress`, reassigns the implementer, and posts an `**AGE-392 gate:**` comment.
+   - **Reviewer discipline (deployed, agentos-config PR #171):** the plugin *detects* but **cannot itself force-revert** an execution stage — only the active reviewer/approver can advance/revert it (a board-key PATCH gets `422 "Only the active reviewer or approver can advance the current execution stage"`). So the reviewer agent's AGENTS.md (Ellis/Tess) is the enforcement point: **find the linked PR → confirm `gh pr view` state is MERGED (merge it yourself with the approver PAT if open) → only then post PASS + advance.** No merged PR (or parent subtasks not all done) ⇒ FAIL, never `done`.
+   - **Remaining hardening (server-side, NOT yet done):** deterministic enforcement that no reviewer can ever PASS over a missing artifact requires a **Paperclip server change** (the execution-policy engine validating the artifact before stage completion). Until then the gate = plugin detection + reviewer discipline. *(Corrects the earlier "merge alone = done, no Paperclip stage" model — the validated gate is the Paperclip review stage + the AGE-392 artifact check.)*
 3. **Recovery routes to the `cto`** (native) = the implementer — never to the `ceo`/approver. **Always have a `cto`** so recovery never falls through to the `ceo`.
 4. **The `ceo` (orchestrator) is never an issue assignee.**
 5. **Scale = more concurrent runs on the `cto`**, not more agents.
@@ -56,7 +59,8 @@ Two identities run the whole loop — and they must be **distinct**:
 
 ## 4. Gate model (one gate, the artifact)
 
-- **Code issues:** `in_progress` (cto) → PR opened (implementer App authors) → `in_review` → **reviewer (qa) approves+merges the PR in GitHub AND posts a PASS verdict** on the Paperclip `review` stage → issue → **`done`**. The implementer cannot self-complete (separate approver required). ⚠️ **AGE-392 gap:** today the **PASS verdict alone** advances the issue to `done` — it is *not* coupled to the GitHub merge. So the reviewer MUST merge before posting the verdict (or you get `done` + unmerged PR). Validated on FON-1 (Willa PR → Tess verdict; merge was done manually). Merge-before-`done` enforcement (plugin guard checking the linked PR is merged before allowing the review stage to complete) is the AGE-392 fix.
+- **Code issues:** `in_progress` (cto) → PR opened (implementer App authors) → `in_review` → **reviewer (qa) merges the PR in GitHub THEN posts a PASS verdict** on the Paperclip `review` stage → issue → **`done`**. The implementer cannot self-complete (separate approver required). **AGE-392 artifact gate (live):** the plugin checks for a MERGED PR (leaf) / all-subtasks-done (parent) before allowing `done`, reverting + posting `**AGE-392 gate:**` on failure; and reviewer AGENTS.md mandates merge-before-PASS. Together: a confabulated `done` (no merged PR) is blocked. The plugin can only *detect* (it isn't the active stage owner — board-key advance/revert returns `422`); the reviewer agent is the enforcement actor. Deterministic, reviewer-independent enforcement is a pending server change.
+- **Implementer push auth (AGE-407 fix):** a bare `git push` from an agent fails with "GitHub auth" — the App token must be **wired into the push** (`git remote set-url origin https://x-access-token:$TOKEN@github.com/...` or `export GH_TOKEN=$TOKEN` + `gh pr create`). ⚠️ **Diagnostic gotcha:** `GET /repos/{repo}.permissions.push` returns **`false` for App installation tokens even when they can write** — it's a user-permissions field, meaningless for Apps. To test an App token's write capability, do a real write (e.g. create+delete a git ref → expect `201`), not the `permissions` field. Implementer AGENTS.md (Axel/Willa) now carries explicit mint→wire→push steps (agentos-config PR #172).
 - **Non-code issues** (decisions/ops/docs not via PR): lightweight — proof-of-work evidence + reviewer/orchestrator verdict. No GitHub artifact.
 
 ---
@@ -102,6 +106,7 @@ Two identities run the whole loop — and they must be **distinct**:
 ## 8. Known gaps to watch until fixed
 | Gap | Risk | Ticket |
 |---|---|---|
+| Artifact gate not server-enforced — a misbehaving reviewer could still PASS over a missing PR (plugin detects + reverts, but can't force the stage; 422) | confabulated `done` if reviewer ignores discipline | AGE-392 (server-side enforcement pending) |
 | Cascade load on a single implementer if stranded repeatedly | re-queue storms | AGE-352 (load cap exists on trapped branch) |
 | Shared deploy-checkout collisions | agents leave repos on feature branches | AGE-353 |
 | Langfuse not fail-open | re-enabling crashes fleet | AGE-354 |
