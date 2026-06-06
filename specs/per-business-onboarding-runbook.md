@@ -1,6 +1,6 @@
 # Per-Business Onboarding Runbook (Paperclip on Hostinger)
 
-**v2.2 — 2026-06-04 — Author: Otis**
+**v3.0 — 2026-06-05 — Author: Otis** — _§9 is the current model (no plan-approval gate; SOUL.md instruction surface; per-agent App-auth wrapper); use it to stand up PER._
 
 How to stand up a new Paperclip business safely and minimally, using Paperclip's **native roles** so native routing/recovery work *for* us. Derived from production learnings running AGE (see `memory/project_phantom_gate_and_reliability.md` and Cloud Migration PRD §3.5).
 
@@ -117,8 +117,8 @@ Two identities run the whole loop — and they must be **distinct**:
 | Business | companyId | ceo | cto | reviewer/approver | Gate verified | Live |
 |---|---|---|---|---|---|---|
 | AGE | f4593f38-… | Juno | Axel (`cto`) | Ellis (`qa`, chrisabad PAT) | ✅ validated end-to-end (dry-run AGE-366: real PR→done; phantom AGE-367 blocked) | ✅ |
-| FON | `029fb83c-…` (prefix FON) | Juno (`16adddf5`, cloned profile) | Willa (`cto`, `2835530c`, willa-bot-fon App) | Tess (`qa`, `e105f216`, chrisabad PAT) | ✅ gate validated (phantom→in_review blocked; policy auto-applies) | 🟢 agents live + wired; happy-path blocked on AGE-384/385 |
-| PER | TBD | Juno | unknown | (chrisabad PAT) | — | deferred (incomplete roster: implementer unknown, Ren in error) |
+| FON | `029fb83c-…` (prefix FON) | Juno-FON (`16adddf5`, never-heartbeat; not needed under no-approval) | Willa (`cto`, `2835530c`, **willa-bot-fon App — write to figma repo confirmed; wrapper now exports GH_TOKEN**) | Tess (`qa`, `e105f216`) | gate wired (routing-rules `029fb83c`, reviewRequired); autonomous e2e FON-2 in validation | 🟢 implementer+reviewer live; Piper/CS in separate session |
+| PER | `9de6c4a9-…` (prefix PER) | orchestrator `2cdc9205` | implementer `3469f1fb` | **MISSING — add a reviewer (the gap)** | — | in routing-rules w/o reviewer; follow §9c checklist |
 
 ### FON provisioning checklist (shell live, agents pending)
 **⚠️ Lesson (2026-06-04): do NOT improvise the roster.** The canonical FON roster already exists in `chrisabad/agentos-config` (`hermes/profiles/<agent>/SOUL.md`), built across many AGE tickets: Willa=CTO, Tess=Reviewer, Roe=Approver, Piper=CS Lead, Arlo=CMO, Cass=CFO, Juno=CEO(shared). An earlier improvised guess (Roe=cto) was **wrong** and produced a bad Paperclip record (since terminated). **Always read the agentos-config profiles first.**
@@ -141,3 +141,36 @@ Two identities run the whole loop — and they must be **distinct**:
 When unblocked: finalize Willa/Tess profiles live, create Paperclip records (Willa `cto`, Tess `qa`), add FON entry to `routing-rules.json` (orchestrator=Juno, dispatcher=Juno, implementer=Willa, reviewer=Tess, approver=Tess) → PR → deploy, set the company review→Tess execution-policy gate, then smoke-test in `chrisabad/figma-plugin-font-replacer` (real code issue → Willa PR → Tess PASS → done; phantom blocked).
 
 **Cutover note (2026-06-04):** AGE template fully cut over + validated. Identity model = implementer App authors PRs, chrisabad PAT approves+merges. Gate = GitHub merge + reviewer PASS verdict (Paperclip review stage). CI on ubuntu (agentos-mac decommissioned); plugin/skills/instructions auto-deploy hosted→VPS via tailscale+ssh. **Cascade resolved (plugin v1.52.0, PR #61):** the non-functional orchestrator-deassign sweep (#58/#59) was reverted; the #57 event-driven reassignment guard + 24 tests retained. Reframed root finding: `issue.created/updated` **are** delivered to the plugin via `plugin-event-bus` (gate fires on status changes; execution policy auto-applies on create) — earlier "events not delivered" was wrong. Narrow open item: assignee-only changes don't trigger the #57 guard (deferred; gate holds regardless).
+
+---
+
+## 9. CURRENT MODEL (2026-06-05) — supersedes earlier sections on conflict; use this to stand up PER
+
+This is the validated autonomous model after the AGE-463 (AGE) + FON-2 (FON) end-to-end runs. Where §1–§8 disagree, §9 wins.
+
+### 9a. The flow (no plan-approval gate)
+A top-level code issue gets `workMode: planning` auto-set by the plugin. Then, **fully autonomously, no human/board in the loop:**
+1. **Implementer plans + decomposes directly.** Writes a short `plan` document, then **creates child issues immediately** (`parentId`, `blockParentUntilDone: true`) — **one PR-sized unit each**. **No `request_confirmation`, no approval step.** (Why: `request_confirmation` is board-gated — `assertBoard` → agents get 403 — so an agent can never resolve it; and a plan-approval gate is redundant. The quality win is the *act* of planning+decomposition.)
+2. **Implement each child →** one **App-authored** PR per child → `in_review`.
+3. **Review = the only gate.** The reviewer (qa) verifies the PR is **MERGED** (merges it via the approver PAT if sound + CI green) **then** posts PASS → child `done`.
+4. **Completeness gate (plugin):** a `workMode:planning` parent **cannot reach `done` until all children are `done`** (`evaluatePlanningCompletion` + `sweepPlanningCompleteness`, plugin ≥v1.63). Grandfathered by a `createdAt` epoch so it never mass-reverts historical issues. Maker ≠ approver throughout.
+
+### 9b. Instruction & identity wiring — the hard-won, easy-to-miss parts
+- **SOUL.md is the per-agent instruction file** (Hermes system-prompt slot #1, loaded from the profile). **Put role + operating rules in SOUL.md.** A **profile-level `AGENTS.md` is NEVER loaded** — Hermes loads `AGENTS.md` only as *CWD/project context* (first of `.hermes.md`/`AGENTS.md`/`CLAUDE.md`/`.cursorrules` from the working dir). The shared CWD file `/docker/paperclip-ezk7/data/AGENTS.md` (→ `/paperclip/AGENTS.md`) is injected into **every** agent across **all** companies — keep it **company-agnostic** (shared workflow only; no per-company roster).
+- **Implementer App-authorship (per agent):** the agent's wrapper `/opt/hermes-wrappers/<agent>.sh` MUST `export GH_TOKEN="$(bash <profile>/bin/mint-github-token.sh --raw)"` (+ `GITHUB_TOKEN`) before `exec hermes`. Otherwise PRs author as the shared `chrisabad` gh login and the reviewer rejects them. The agent's GitHub App must be **installed on the company's repo with write** — verify with a real write (`POST git/refs` create+delete a ref → `201`), **NOT** `repo.permissions.push` (always `false` for App tokens). Mind the repo's **default branch** (FON's figma repo is `master`, not `main`).
+- **Gate config = `routing-rules.json`** company entry: `{implementer, reviewer, approver(=reviewer ok), orchestrator, dispatcher}` + `workflow.reviewRequired: true`. (Plus the plugin A.4 auto-applies the review executionPolicy.)
+- **Observability (Langfuse):** the `observability/langfuse` plugin ships **disabled** — it must be in the `enabled:` list in each agent's `config.yaml` (not merely absent from `disabled:`), with creds in `~/.hermes/.env` (= `HERMES_HOME/.hermes/.env`; gateway HOME = juno). Do NOT put the old `/paperclip/langfuse_libs` (v2) on PYTHONPATH — that crashed the fleet (AGE-354). Plugin is v3-compatible + fail-open.
+- **Skills:** ensure readable — `chmod -R a+rX /opt/hermes-profiles/*/skills` (default perms were owner-only → `Errno 13` on `skill_view`). Breakdown skill = `paperclip-converting-plans-to-tasks`.
+
+### 9c. PER onboarding checklist (do these)
+PER company id `9de6c4a9`, prefix `PER`. **Already in `routing-rules.json` with implementer `3469f1fb` + orchestrator `2cdc9205` but NO reviewer** — that's the gap.
+1. **Create/assign a PER reviewer agent** (qa) and add `reviewer` (+ `approver`) to the PER routing-rules entry; set `workflow.reviewRequired: true`. (Maker ≠ approver — reviewer ≠ implementer `3469f1fb`.)
+2. **Implementer identity:** confirm PER's implementer has a GitHub App installed-with-write on PER's repo, and its wrapper exports `GH_TOKEN` (9b). Verify via create-ref `201`.
+3. **Instructions in SOUL.md** for each PER agent (role + the 9a flow). Do not rely on profile AGENTS.md.
+4. **Enable Langfuse** for PER agents (9b) for observability from day one.
+5. **Autonomous e2e:** file one multi-part `workMode:planning` issue assigned to the PER implementer; confirm it plans → creates children directly (no `request_confirmation`) → App-authored PRs → reviewer merges → parent `done` only after children done.
+6. **Watch window:** `adapter_failed` ~0; no phantom `done`; the completeness gate not mass-firing (it's epoch-grandfathered).
+
+### 9d. Validated
+- **AGE:** AGE-463 — plan → 3 children created directly (no confirmation) → App-authored PRs (`app/axel-agentos`) → review. ✅
+- **FON:** Willa App-auth fixed (`willa-bot-fon` write to figma repo `master` confirmed); FON-2 multi-part e2e running to validate the same path. Gate wired (routing-rules `029fb83c`, reviewRequired). Piper/CS handled in a separate session.
