@@ -7,7 +7,7 @@
 **Auth:** `Authorization: Bearer $PAPERCLIP_BOARD_KEY_CLOUD` (board key — use for all cloud operations)  
 **VPS:** SSH is Tailnet-only (`root@100.117.92.5`). **Cloud sessions cannot SSH** — operate over the Paperclip HTTPS API and delegate VPS shell work to **Axel** (runs on the VPS). For direct shell, use a local Tailnet session. Key: `~/.ssh/agentos_migration_2026-05-27` or AWS Secrets Manager `agentos/otis/vps_ssh_key`.
 
-## Cloud Operational Runbook (hard-won, 2026-05-30)
+## Cloud Operational Runbook (hard-won, 2026-05-30; updated 2026-06-09)
 
 **Embedded Postgres access** (DB is container-local, port not host-exposed):
 ```bash
@@ -30,6 +30,32 @@ Conn: `host 127.0.0.1 port 54329 user/pass/db = paperclip`. NOTE: `interval $1` 
 
 **Concurrency.** Implementation agents default `maxConcurrentRuns=1` (avoids concurrent VPS file/git conflicts). Axel bumped to **2** on 2026-05-30 (backlog of independent tasks + headroom: load ~0.2/2cpu, ~5.9GB free); verified no conflicts. Bump cautiously; watch for `lock`/`git`/`conflict` in stderr.
 
+**SSH key — local sessions.** Key is NOT reliably at `~/.ssh/agentos_migration_2026-05-27` across machines. Fetch from AWS SM on first use:
+```bash
+aws secretsmanager get-secret-value --secret-id agentos/otis/vps_ssh_key --region us-east-1 \
+  --query SecretString --output text > /tmp/vps_key && chmod 600 /tmp/vps_key
+# Then: ssh -i /tmp/vps_key -o StrictHostKeyChecking=no root@100.117.92.5
+```
+
+**Postgres settings (2026-06-09).** Applied via `ALTER SYSTEM` + `pg_reload_conf()`:
+- `idle_in_transaction_session_timeout = 2min` — auto-kills zombie advisory lock holders (dispatch pile-up symptom)
+- `statement_timeout = 2min` — safety net for runaway queries
+- For intentional long ops (bulk DELETEs, index builds): prepend `SET statement_timeout = 0` in the same session. Use `CREATE INDEX CONCURRENTLY` to avoid table locks.
+
+**Advisory lock pile-up symptom.** If UI is slow: check `SELECT state, count(*) FROM pg_stat_activity GROUP BY 1`. `idle in transaction` + ungranted locks = dispatch queue blocked. Fix: `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state='idle in transaction'`. Now auto-healed by `idle_in_transaction_session_timeout`.
+
+**DB bloat / heartbeat_runs purge.** Storm incidents generate 10k–100k failed rows fast. Purge pattern (FK graph requires order):
+1. Delete child rows: `heartbeat_run_events`, `activity_log`, `environment_leases`, `finance_events`, `cost_events`
+2. NULL FK refs in important tables: `issues`, `issue_comments`, `document_revisions`, `agent_task_sessions`, etc.
+3. Delete `heartbeat_runs` WHERE terminal status + age cutoff
+4. VACUUM FULL to reclaim disk
+**Critical:** `heartbeat_runs.retry_of_run_id` and `heartbeat_runs.wakeup_request_id` MUST have indexes before bulk DELETE or it will take hours (seq scan per row). Indexes added 2026-06-09; verify with `\d heartbeat_runs`.
+
+**Zombie process detection.** Agents occasionally spawn `grep -rl /` or `find /` from root filesystem — saturates CPU for days with no visibility. Check: `ps aux --sort=-%cpu | head -10`. Kill: `kill -9 <pid>`. Integrity monitor section 6 now auto-kills these after 5 min. Filed AGE-775 for permanent fix (wrapper timeouts + filesystem permission lockdown).
+
+**Missing indexes (added 2026-06-09).** The following indexes were absent and added; if DB is ever recreated, re-apply:
+`board_api_keys(key_hash, user_id)`, `agent_api_keys(key_hash, agent_id, company_id)`, `instance_user_roles(user_id)`, `"user"(email)`, `company_memberships(company_id, principal_id)`, `issue_labels(issue_id, company_id)`, `labels(company_id)`, `activity_log(agent_id)`, `activity_log(actor_type, actor_id)`, `document_revisions(document_id)`, `document_revisions(company_id, created_at DESC)`, `heartbeat_runs(retry_of_run_id)`, `heartbeat_runs(wakeup_request_id)`.
+
 ## Active Phase: AGE Phase 2 Stabilization
 
 Goal: make AGE autonomous, observable, and clean before onboarding FON. PRD at `memory/prds/2026-05-29-age-phase2-stabilization.md`.
@@ -44,11 +70,16 @@ Fleet stable + productive: 0 failures/timeouts in recent windows, ~8 issues done
 - **Axel maxConcurrentRuns 1→2** — draining its queue 2-at-a-time, no conflicts.
 
 ### Open threads (for the next session)
-- **AGE-153** (Axel): item 3 = comment checkout-auth 401 (adapter prompt-template needs `x-paperclip-run-id`; new patch 058 + PR) + the `Session not found: from` `--resume` bug (item 4). Code-level dispatcher removal also lands here.
-- **AGE-155** (Axel): document cloud stabilization in agentos-docs (runbook + provider invariant).
-- **Staged routing changes** (FON + 6 others) apply on the **next container restart** — make sure a restart happens during FON standup.
-- **Monitoring does NOT auto-carry across machines** — re-run the checklist below (storm tripwire) to re-establish the watch; consider bumping Axel→3 if its queue stays deep and clean.
-- Local auto-memory (provider-inference, AGE-115 cap, routing-rules) is per-machine; the durable copies are this runbook + Paperclip issues AGE-95/115/153/155.
+- **AGE-775** (CRITICAL, new 2026-06-09): Permission lockdown — agents must not write wrappers/config/env. Filesystem write lockdown + `timeout 600` in hermes wrappers + DB purge cron. Assign to Axel.
+- **AGE-623**: Paperclip recovery must respect agent pause. Monitor storm-cap is interim.
+- **AGE-624**: Langfuse stays OFF until crash is reproduced+fixed+verified.
+- **~30 parked AGE issues**: Re-triage to resume AGE work (backlog/unassigned from Jun 8 storm cap).
+- **`document_revisions` 297 MB**: Indexes added but content not purged. Storm-era revisions still present. Purge old revisions (keep last N per document).
+- **`activity_log` 122 MB**: 152k rows, not purged. Age out rows older than 30 days.
+- **AGE-153** (Axel): checkout-auth 401 + `Session not found: from` --resume bug.
+- **AGE-155** (Axel): document cloud stabilization in agentos-docs.
+- **Staged routing changes** (FON + 6 others) apply on the **next container restart**.
+- **AGE-668**: Ollama credential pooling needs Hermes upgrade (v0.15.2 prunes manual pool creds).
 
 ### Pre-existing distinct scope (not Phase 2)
 - AGE-2: Set up FON company (next phase)
