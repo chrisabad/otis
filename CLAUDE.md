@@ -40,15 +40,18 @@ Complete the HEARTBEAT.md checklist, emit a brief status, and exit. If the Paper
 
 ## VPS Access
 
-The VPS (`root@100.117.92.5`, Tailnet IP) exposes SSH **only over Tailscale** — port 22 is intentionally not public (firewall group `agentos-paperclip-tailnet-only` allows only ICMP/80/443/Tailscale-UDP). Two operating modes:
+The VPS (`root@100.117.92.5`, Tailnet IP) exposes SSH **only over Tailscale** — port 22 is intentionally not public (firewall group `agentos-paperclip-tailnet-only` allows only ICMP/80/443/Tailscale-UDP).
 
-**Cloud sessions (Claude cloud env — no Tailscale, egress is HTTPS-only):** You cannot SSH to the VPS, and tunnels don't help (the egress is a transparent TLS proxy). Operate over the Paperclip HTTPS API with `$PAPERCLIP_BOARD_KEY_CLOUD` — check the board, manage routines, file issues. For anything needing VPS shell (deploying services, editing files, systemctl, patches), file a precisely-scoped issue assigned to **Axel**, who runs on the VPS with native shell. Ellis reviews, merge follows. This is the autonomous execution model — Otis plans, on-box agents execute.
+**Both cloud and local sessions have Tailscale.** The setup script connects the cloud environment to the Tailnet on startup. SSH works the same in both modes.
 
-**Local sessions with Tailscale:** Pull this same repo in an environment that can join the Tailnet, then SSH directly for hands-on/exploratory work:
+**SSH key:** The key is not persisted in cloud sessions. Fetch it from AWS Secrets Manager at runtime:
 ```bash
-ssh -i ~/.ssh/agentos_migration_2026-05-27 root@100.117.92.5
+aws secretsmanager get-secret-value --secret-id agentos/otis/vps_ssh_key --region us-east-1 \
+  --query SecretString --output text > /tmp/vps_key && chmod 600 /tmp/vps_key
+ssh -i /tmp/vps_key -o StrictHostKeyChecking=no root@100.117.92.5
 ```
-If the key isn't on the machine, fetch it from AWS Secrets Manager (`agentos/otis/vps_ssh_key`, region `us-east-1`) using the AWS creds in env, write to a temp file, `chmod 600`, and use with `ssh -i`.
+
+**Local sessions** may already have the key at `~/.ssh/agentos_migration_2026-05-27`; use that directly if it exists, otherwise fetch from AWS SM as above.
 
 ## Context Files (read if needed)
 
