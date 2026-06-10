@@ -173,6 +173,64 @@ thread_note() {
         -d "$(jq -n --arg q "$query" --argjson v "$variables" '{query: $q, variables: $v}')"
 }
 
+thread_reply() {
+    local thread_id=""
+    local text=""
+    local text_file=""
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --text) text="$2"; shift 2 ;;
+            --text-file) text_file="$2"; shift 2 ;;
+            '') shift ;;
+            *) thread_id="$1"; shift ;;
+        esac
+    done
+
+    if [[ -n "$text_file" ]]; then
+        if [[ ! -f "$text_file" ]]; then
+            echo "Error: Text file not found: $text_file" >&2
+            exit 1
+        fi
+        text=$(cat "$text_file")
+    fi
+
+    if [[ -z "$thread_id" ]] || [[ -z "$text" ]]; then
+        echo "Error: thread_id and --text (or --text-file) are required" >&2
+        echo "Usage: plain-api.sh thread reply <thread_id> --text \"Reply text\"" >&2
+        exit 1
+    fi
+
+    local query='mutation ReplyToThread($input: ReplyToThreadInput!) { replyToThread(input: $input) { error { message code fields { field message type } } } }'
+    local variables
+    variables=$(jq -n --arg threadId "$thread_id" --arg text "$text" \
+        '{input: {threadId: $threadId, textContent: $text}}')
+
+    gql "$query" "$variables"
+}
+
+thread_mark_done() {
+    local thread_id="${1:-}"
+    if [[ -z "$thread_id" ]]; then
+        echo "Error: thread_id is required" >&2
+        echo "Usage: plain-api.sh thread mark-done <thread_id>" >&2
+        exit 1
+    fi
+    gql 'mutation MarkDone($input: MarkThreadAsDoneInput!) { markThreadAsDone(input: $input) { thread { id status } error { message code } } }' \
+        "{\"input\": {\"threadId\": \"$thread_id\"}}"
+}
+
+thread_mark_todo() {
+    local thread_id="${1:-}"
+    if [[ -z "$thread_id" ]]; then
+        echo "Error: thread_id is required" >&2
+        echo "Usage: plain-api.sh thread mark-todo <thread_id>" >&2
+        exit 1
+    fi
+    gql 'mutation MarkTodo($input: MarkThreadAsTodoInput!) { markThreadAsTodo(input: $input) { thread { id status } error { message code } } }' \
+        "{\"input\": {\"threadId\": \"$thread_id\"}}"
+}
+
 thread_get() {
     local id="$1"
     gql 'query($id: ID!) { thread(threadId: $id) { id title description previewText status priority externalId channel customer { id fullName email { email } } assignedTo { ... on User { id fullName } ... on MachineUser { id fullName } } labels { id labelType { id name } } createdAt { iso8601 } updatedAt { iso8601 } } }' \
@@ -945,6 +1003,9 @@ EXAMPLES:
   plain-api.sh thread get th_123
   plain-api.sh thread timeline th_123 --first 50
   plain-api.sh thread note th_123 --text "Internal note content"
+  plain-api.sh thread reply th_123 --text "Reply text sent to customer"
+  plain-api.sh thread mark-done th_123
+  plain-api.sh thread mark-todo th_123
 
   plain-api.sh thread link add th_123 https://github.com/owner/repo/issues/45
   plain-api.sh thread link add th_123 owner/repo#45
@@ -1002,6 +1063,9 @@ main() {
                 search) thread_search "$@" ;;
                 timeline) thread_timeline "$@" ;;
                 note) thread_note "$@" ;;
+                reply) thread_reply "$@" ;;
+                mark-done) thread_mark_done "$@" ;;
+                mark-todo) thread_mark_todo "$@" ;;
                 link)
                     local sub_action="${1:-list}"
                     shift || true
