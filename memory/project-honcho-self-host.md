@@ -1,25 +1,43 @@
 # Project: Honcho Self-Host
 
-**Status:** In progress — Axel assigned, backlog  
+**Status:** Phases 1–4 COMPLETE — in 24h soak before Phase 5 decommission  
 **Paperclip issue:** `74ca3009` (AGE)  
 **Goal:** Replace `mcp.honcho.dev` cloud with a self-hosted Honcho instance on the AGE VPS to reduce costs.
 
-## Current integration surface
+## Completed (2026-06-10)
 
-- `.claude/honcho-mcp.sh` — `npx mcp-remote https://mcp.honcho.dev` with `Authorization: Bearer $HONCHO_API_KEY`
-- `.env` — `HONCHO_API_KEY=hch-v3-92j1...` (cloud key)
-- `/opt/hermes-profiles/*/honcho.json` on VPS — per-agent plugin configs pointing at cloud URL
+### Phase 1 — Deploy ✅
+- Docker Compose at `/opt/honcho/docker-compose.yml` on VPS
+- 4 containers: `honcho-api-1`, `honcho-database-1`, `honcho-deriver-1`, `honcho-redis-1`
+- API bound to `100.117.92.5:8000` (Tailscale IP only — not localhost, not public)
+- `.env` at `/opt/honcho/.env` with Ollama Cloud creds as deriver LLM
 
-## Migration spec (5 phases, Axel owns all VPS work)
+### Phase 2 — HTTPS ✅ (pragmatic)
+- No HTTPS cert issued: Traefik can't cert `.ts.net` subdomains; Tailscale provides transport encryption
+- Agents connect via `http://100.117.92.5:8000` — still encrypted end-to-end by Tailscale network layer
 
-1. **Deploy** — Docker Compose on VPS: API (port 8000) + deriver worker + Postgres/pgvector + Redis. Deriver LLM: Ollama Cloud via OpenAI-compat transport, using existing fleet Ollama credentials.
-2. **Caddy** — Tailscale-only HTTPS: `honcho.{tailscale-hostname}.ts.net` → localhost:8000. No public exposure.
-3. **Data migration** — Script to GET all apps/sessions/messages from cloud (`Agentos` workspace) and POST to self-hosted; assert row counts match before cutover.
-4. **Cutover** — Two repo file changes: swap URL in `.claude/honcho-mcp.sh` (drop `Authorization` header — no auth on self-hosted), comment out `HONCHO_API_KEY` in `.env`. Update `/opt/hermes-profiles/*/honcho.json` on VPS.
-5. **Validate & decommission** — 24h soak, then cancel cloud subscription and delete cloud API key.
+### Phase 3 — Data migration ✅
+- Migration script at `/opt/honcho/migrate-from-cloud.py`
+- Result: 10 peers, 23 sessions, 5534 messages migrated (7 truncated to 24900 chars)
+- paperclip session: 4800/4800 messages migrated
+
+### Phase 4 — Cutover ✅
+- All 10 `/opt/hermes-profiles/*/honcho.json` updated: added `"baseUrl": "http://100.117.92.5:8000"`
+- `.env` and `config.yaml` permissions fixed: `root:paperclip 640` so hermes-gateway (runs as `paperclip`) can read them
+- hermes-gateway restarted and running healthy
+
+## Phase 5 — Still needed (after 24h soak)
+- Validate one full heartbeat run with self-hosted Honcho (check logs for `base_url: http://100.117.92.5:8000`)
+- Cancel cloud Honcho subscription
+- Delete cloud API key (`hch-v3-92j1...`) from `.env` and agent profiles
+
+## Key files
+- Self-hosted API: `http://100.117.92.5:8000` (Tailscale-only)
+- Docker Compose: `/opt/honcho/docker-compose.yml`
+- Migration script: `/opt/honcho/migrate-from-cloud.py`
+- Agent configs: `/opt/hermes-profiles/*/honcho.json` (all have `baseUrl` set)
 
 ## Notes
-
-- No maintenance window needed — cutover is a config swap
 - `AUTH_USE_AUTH=false` on self-hosted (Tailscale is the auth layer)
-- If deriver model causes issues, refer to fleet eval table in RUNBOOK.md for model alternatives
+- Honcho plugin reads `baseUrl` from honcho.json (takes priority over `HONCHO_BASE_URL` env var)
+- V3 API: messages use `peer_id` field (not `role`), batch endpoint requires `{"messages": [...]}`
