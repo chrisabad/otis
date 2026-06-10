@@ -26,10 +26,9 @@
 - `.env` and `config.yaml` permissions fixed: `root:paperclip 640` so hermes-gateway (runs as `paperclip`) can read them
 - hermes-gateway restarted and running healthy
 
-## Phase 5 — Still needed (after 24h soak)
-- Validate one full heartbeat run with self-hosted Honcho (check logs for `base_url: http://100.117.92.5:8000`)
-- Cancel cloud Honcho subscription
-- Delete cloud API key (`hch-v3-92j1...`) from `.env` and agent profiles
+## Phase 5 — Still needed
+- Cancel cloud Honcho subscription (mcp.honcho.dev)
+- Delete cloud API key (`hch-v3-92j1...`) from all agent `.env` files on VPS
 
 ## Key files
 - Self-hosted API: `http://100.117.92.5:8000` (Tailscale-only)
@@ -41,3 +40,7 @@
 - `AUTH_USE_AUTH=false` on self-hosted (Tailscale is the auth layer)
 - Honcho plugin reads `baseUrl` from honcho.json (takes priority over `HONCHO_BASE_URL` env var)
 - V3 API: messages use `peer_id` field (not `role`), batch endpoint requires `{"messages": [...]}`
+- **Deriver disabled** (`DERIVER_ENABLED=false`): Ollama Cloud doesn't support structured output (required by deriver). Basic session storage + context recall (`recallMode: "context"`) fully works. Dialectic queries still attempted but fail silently (non-fatal warnings in agent logs).
+- Juno run failures are pre-existing Langfuse `_create_span_with_parent_context` noise, not Honcho-related
+- `docker compose restart` does NOT re-read `.env` — must use `docker compose up -d` to pick up env changes
+- Brief API downtime during container recreation causes "Connection refused" sync failures — plan restarts during low-activity periods
