@@ -56,8 +56,10 @@ log lines across agent logs; credential pool rotating keys just delays the wall.
 - nemotron-3-nano:30b (3B active): t1 PASS t3 PASS t4 PASS t5 PASS t6 PASS (HTTP 200);
   t2 borderline-pass (right direction env/masking + verification cmds, but single-hypothesis).
   25–40s latencies. Strongest small-model showing yet.
-- deepseek-v4-flash (284B/13B active): t1 t3 t4 t5 PASS; t2 good; t6 FAIL (401) — NEEDS RETEST
-  before concluding self-sabotage (methodology: verify reported failures).
+- deepseek-v4-flash (284B/13B active): t1 t3 t4 t5 PASS; t2 good; t6 PASS (confirmed 2026-06-10
+  fresh session via direct API — original 401 was stale resumed session context bleed, not
+  self-sabotage). All 6 criteria pass. ~4x GPU time vs nemotron (13B vs 3B active) — potential
+  mid-tier option if task quality warrants it.
 - Note: bakeoff runs resume session 20260603_153056_695eb8 (same as prior runs — comparable, but
   consider fresh-session flag for future harness versions).
 
@@ -89,7 +91,7 @@ log lines across agent logs; credential pool rotating keys just delays the wall.
 - [x] **Credential pool**: .env files for all 16 profiles swapped to chrisabad key-b (kaleidoscope maxed)
 
 ## Open items
-- [ ] deepseek-v4-flash t6 retest — confirm self-sabotage vs methodology artifact
+- [x] deepseek-v4-flash t6 retest — PASS, original failure was stale session context (not self-sabotage). All 6/6 criteria pass. Mid-tier candidate if nemotron capability proves insufficient.
 - [ ] gpt-oss:20b retest when Ollama Cloud server-side bug is resolved
 - [ ] PR #32 merge (agentos-docs)
 - [ ] Paperclip recovery loop backoff implementation (AGE-829, assigned Axel)
