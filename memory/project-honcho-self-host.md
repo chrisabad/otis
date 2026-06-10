@@ -1,6 +1,6 @@
 # Project: Honcho Self-Host
 
-**Status:** Phases 1–4 COMPLETE — in 24h soak before Phase 5 decommission  
+**Status:** ALL 5 PHASES COMPLETE (2026-06-10)  
 **Paperclip issue:** `74ca3009` (AGE)  
 **Goal:** Replace `mcp.honcho.dev` cloud with a self-hosted Honcho instance on the AGE VPS to reduce costs.
 
@@ -26,9 +26,9 @@
 - `.env` and `config.yaml` permissions fixed: `root:paperclip 640` so hermes-gateway (runs as `paperclip`) can read them
 - hermes-gateway restarted and running healthy
 
-## Phase 5 — Still needed
-- Cancel cloud Honcho subscription (mcp.honcho.dev)
-- Delete cloud API key (`hch-v3-92j1...`) from all agent `.env` files on VPS
+## Phase 5 — COMPLETE ✅
+- Cloud Honcho subscription cancelled (Chris, 2026-06-10)
+- `HONCHO_API_KEY` removed from all 9 active agent `.env` files on VPS
 
 ## Key files
 - Self-hosted API: `http://100.117.92.5:8000` (Tailscale-only)
