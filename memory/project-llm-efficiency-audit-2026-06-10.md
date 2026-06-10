@@ -1,6 +1,6 @@
 # Project: LLM Efficiency Audit (2026-06-10)
 
-**Status:** IN PROGRESS — audit complete, bake-off running, implementation pending
+**Status:** COMPLETE — all changes applied 2026-06-10
 **Trigger:** Burning through Ollama Cloud limits post-cloud-migration; prior optimization lost.
 
 ## Context: Ollama Cloud pricing is GPU-TIME based, not token based
@@ -68,11 +68,28 @@ log lines across agent logs; credential pool rotating keys just delays the wall.
   (vs Pro 67.9). Near-Pro coding at flash GPU cost.
 - glm-5.1 — incumbent flagship; keep ONLY where interactive personality matters (Juno Slack) per Chris.
 
-## Decisions / next steps
-- [ ] Finish bake-off scoring (gpt-oss:20b, ministral-3:8b, minimax-m2.5) + read transcripts
-- [ ] Retest deepseek t6
-- [ ] Tiering proposal: see audit deliverable
-- [ ] Fix BOTH config places (Paperclip adapterConfig + hermes profile) when assigning models
-- [ ] Aux slots → cheap model (ministral/nemotron-nano class) fleet-wide
-- [ ] Timeout-retry storm: cap retries / backoff in recovery loop (file issue → Axel), AGE-784 watchdog
-- [ ] Rewrite agentos-docs architecture/model-routing.mdx (currently describes dead LiteLLM era)
+## gpt-oss:20b status (2026-06-10 retest)
+- Confirmed NOT a quota failure. HTTP 200 on all endpoints, eval_count=38-48 tokens processed,
+  but content/thinking both empty on OpenAI-compat, native chat, and raw generate.
+  Server-side Ollama Cloud bug — model runs but produces no visible output. Skip for tiering.
+  Prior AGE-295 6/6 result stands as a historical record; model is currently unusable on cloud.
+
+## Changes applied (2026-06-10)
+- [x] **Model assignments BOTH places**: nemotron-3-nano:30b for all STANDARD agents
+  (Axel, Ellis, Quinn, Vera, Dex, Willa, Tess, Hollis, Nell, Morgan) in Paperclip adapterConfig +
+  hermes profile config.yaml. Juno + Piper kept glm-5.1:cloud (interactive/CS).
+- [x] **Aux slots**: title_generation, compression, triage_specifier, skills_hub, approval
+  → provider: main, model: ministral-3:8b fleet-wide (all 14 agents)
+- [x] **api_max_retries: 1** (was 3) on all agents — reduces internal retry waste per run
+- [x] **Compression threshold: 0.35** (was 0.5) on all agents — triggers at ~46k ctx instead of ~65k
+- [x] **Piper wrapper fixed**: added timeout 600 + --continue for chat; added /opt/hermes-wrappers/piper.sh
+- [x] **Recovery loop backoff**: filed AGE-829 to Axel
+- [x] **AGE-784 watchdog**: pre-existing issue confirmed in backlog (assigned Juno)
+- [x] **agentos-docs model-routing.mdx**: rewritten, PR #32 open on chrisabad/agentos-docs branch llm-model-strategy
+- [x] **Credential pool**: .env files for all 16 profiles swapped to chrisabad key-b (kaleidoscope maxed)
+
+## Open items
+- [ ] deepseek-v4-flash t6 retest — confirm self-sabotage vs methodology artifact
+- [ ] gpt-oss:20b retest when Ollama Cloud server-side bug is resolved
+- [ ] PR #32 merge (agentos-docs)
+- [ ] Paperclip recovery loop backoff implementation (AGE-829, assigned Axel)
