@@ -231,6 +231,21 @@ thread_mark_todo() {
         "{\"input\": {\"threadId\": \"$thread_id\"}}"
 }
 
+thread_assign() {
+    local thread_id="${1:-}"
+    local machine_user_id="${2:-}"
+    if [[ -z "$thread_id" ]] || [[ -z "$machine_user_id" ]]; then
+        echo "Error: thread_id and machine_user_id are required" >&2
+        echo "Usage: plain-api.sh thread assign <thread_id> <machine_user_id>" >&2
+        exit 1
+    fi
+    local query='mutation AssignThread($input: AssignThreadInput!) { assignThread(input: $input) { thread { id assignedTo { ... on MachineUser { id fullName } ... on User { id fullName } } } error { message code } } }'
+    local variables
+    variables=$(jq -n --arg threadId "$thread_id" --arg machineUserId "$machine_user_id" \
+        '{input: {threadId: $threadId, machineUserId: $machineUserId}}')
+    gql "$query" "$variables"
+}
+
 thread_get() {
     local id="$1"
     gql 'query($id: ID!) { thread(threadId: $id) { id title description previewText status priority externalId channel customer { id fullName email { email } } assignedTo { ... on User { id fullName } ... on MachineUser { id fullName } } labels { id labelType { id name } } createdAt { iso8601 } updatedAt { iso8601 } } }' \
@@ -1006,6 +1021,7 @@ EXAMPLES:
   plain-api.sh thread reply th_123 --text "Reply text sent to customer"
   plain-api.sh thread mark-done th_123
   plain-api.sh thread mark-todo th_123
+  plain-api.sh thread assign th_123 mu_01KQMV1CF8JHPAS1RWNHNQGY25
 
   plain-api.sh thread link add th_123 https://github.com/owner/repo/issues/45
   plain-api.sh thread link add th_123 owner/repo#45
@@ -1066,6 +1082,7 @@ main() {
                 reply) thread_reply "$@" ;;
                 mark-done) thread_mark_done "$@" ;;
                 mark-todo) thread_mark_todo "$@" ;;
+                assign) thread_assign "$@" ;;
                 link)
                     local sub_action="${1:-list}"
                     shift || true
