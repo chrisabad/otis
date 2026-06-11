@@ -90,15 +90,12 @@ log lines across agent logs; credential pool rotating keys just delays the wall.
 - [x] **agentos-docs model-routing.mdx**: rewritten, PR #32 open on chrisabad/agentos-docs branch llm-model-strategy
 - [x] **Credential pool**: .env files for all 16 profiles swapped to chrisabad key-b (kaleidoscope maxed)
 
-## Regression: Juno adapterConfig model (discovered 2026-06-10 ~20:00 UTC)
-- **Bug**: The bulk adapterConfig update accidentally set Juno to `nemotron-3-nano:30b` instead of keeping
-  `glm-5.1:cloud`. Juno's hermes profile config.yaml was correct (glm-5.1), but Paperclip's adapterConfig
-  overrides the profile — so Juno ran on nemotron from ~09:14 UTC to ~20:00 UTC.
-- **Symptoms**: 62 Juno runs with exit_code=124 (avg 780s), bad tool calls (missing URLs, wrong JSON, using
-  bash commands as tool calls), constant tool errors. 155 total failed runs in 6h window.
-- **Fix**: `UPDATE agents SET adapter_config = jsonb_set(adapter_config, '{model}', '"glm-5.1:cloud"') WHERE id = 'a38cd7bc-b6e3-47f8-a4b8-1e186d85a869'` — applied directly to DB 2026-06-10.
-- **Lesson**: When doing bulk adapterConfig updates, always explicitly exclude Juno from model changes.
-  Verify DB adapterConfig matches intent after any fleet-wide update.
+## CORRECTION (2026-06-10 ~20:xx UTC)
+- Juno IS intentionally on `nemotron-3-nano:30b` in Paperclip adapterConfig. This was a deliberate choice
+  made after the efficiency audit memory was written (memory captured the plan, not the final state).
+- The hermes profile config.yaml still says `glm-5.1:cloud` — that's intentionally mismatched; Paperclip
+  adapterConfig is the override and takes precedence.
+- Do NOT change Juno's model based on the memory saying "Juno kept glm-5.1". Trust the DB as ground truth.
 
 ## Open items
 - [x] deepseek-v4-flash t6 retest — PASS, original failure was stale session context (not self-sabotage). All 6/6 criteria pass. Mid-tier candidate if nemotron capability proves insufficient.
