@@ -1,8 +1,3 @@
 {
-  "mcpServers": {
-    "honcho": {
-      "command": "/Users/cabad/Documents/GitHub/otis/.claude/honcho-mcp.sh",
-      "args": []
-    }
-  }
+  "mcpServers": {}
 }
