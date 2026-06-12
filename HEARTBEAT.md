@@ -24,7 +24,7 @@ Conn: `host 127.0.0.1 port 54329 user/pass/db = paperclip`. NOTE: `interval $1` 
 
 **Ollama keys — connection pool (2026-06-01).** All agents now have BOTH account keys in their `ollama-cloud` credential pool (`hermes auth list`). Primary key from `.env`; secondary added via `hermes auth add`. On 401/exhaustion hermes auto-rotates to the secondary — no run failure. Accounts: kaleidoscope (chris@kaleidoscope.studio) key `9262d8…` = primary for Juno/Quinn/Vera/Supervisor/Dex; chrisabad (chrisabad@gmail.com) key `bd15e8…` = primary for Axel/Ellis/Orion. To add a new key to all agents: `for agent in juno quinn vera supervisor dex axel ellis orion; do HERMES_HOME=/opt/hermes-profiles/$agent /opt/hermes-venv/bin/hermes auth add ollama-cloud --type api-key --api-key <key> --label <name>; done`. To clear a stale `exhausted` state: edit `auth.json` in the profile dir, null out `last_status`/`last_error_*`/`secret_fingerprint` for the affected entry. No secret-sync on the box — `.env` edits and `auth.json` edits are durable.
 
-**Run timeout.** Orchestration/impl agents (Juno/Axel/Ellis) `adapter_config.timeoutSec=600` (others default 300); legit multi-step work was hitting the 300s wall (`timed_out`).
+**Run timeout.** All agents `adapter_config.timeoutSec=1800`; wrappers use `timeout 1900` (100s margin above Hermes internal timeout). Raised 2026-06-11: deepseek-v4-flash at 30-100s/API call requires far more wall-clock than prior 3B models.
 
 **Agent routing = OUR plugin, not native.** Per-company role routing lives in `kaleidoscope-issue-trigger`'s `/docker/paperclip-ezk7/data/plugins/kaleidoscope-issue-trigger/routing-rules.json` (host-durable). `getAgentId(companyId,role)` reads it at module load → **edits need a container restart to reload**. The deprecated `dispatcher` role funneled all work through Juno (single-concurrency) → choke. Removed fleet-wide 2026-05-30 (AGE live; FON + WEE/KAL/DIA/PIX/STM/PER/AGE-local **staged — apply on next restart**). `workflow.dispatchRequired` is vestigial (never read). AGE roles now: implementer=Orion, reviewer=Ellis, approver+orchestrator=Juno. Full code-level removal of dead dispatcher-wakeup logic → plugin PR (Axel).
 
@@ -109,6 +109,23 @@ Fleet stable + productive: 0 failures/timeouts in recent windows, ~8 issues done
    If any agent is in `error` state: check profile ownership (chown 1000:1000), verify .env keys, wake agent.
 
 3. **Storm tripwire (local Tailnet sessions).** Check `failed`/min and `heartbeat_runs` row count (see runbook). If failing rapidly / rows ballooning: kill-switch `UPDATE agents SET status='paused'`, then diagnose (provider mis-route? key? recovery loop?). Also run `/opt/agentos-tools/check-agent-provider.sh` after any model change.
+
+3b. **Model config integrity check.** Verify the two-layer model setup hasn't drifted (see AGENTS.md "Model configuration" section):
+   ```bash
+   # Paperclip layer — all active agents must show deepseek-v4-flash
+   docker exec paperclip-ezk7-paperclip-1 psql -h /tmp -p 54329 -U paperclip -d paperclip -t -c \
+     "SELECT name, adapter_config->>'model' FROM agents WHERE status != 'terminated' ORDER BY name;"
+   # Expected: deepseek-v4-flash for all agents except those with no model set (Otis, KAL Juno).
+
+   # Hermes layer — only juno/juno-fon/juno-per/piper should show GLM
+   for p in juno juno-fon juno-per piper axel ellis; do
+     echo "$p: $(grep 'default:' /opt/hermes-profiles/$p/config.yaml | grep -v '#' | head -1)"
+   done
+   # Expected: juno*/piper → glm-5.1:cloud; axel/ellis → deepseek-v4-flash
+   ```
+   If anything shows `glm-5.1:cloud` in Paperclip adapterConfig, or `deepseek-v4-flash` in juno/piper
+   Hermes profiles: file an AGE issue with label `model-drift` and fix it. Do NOT silently revert — the
+   two-layer split is intentional (see AGENTS.md for rationale).
 
 4. **Advance highest-priority backlog item** only if it needs Otis (planning/cross-cutting). Routine implementation drains via dispatch — don't hand-work the queue.
 

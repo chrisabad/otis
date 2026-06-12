@@ -1,3 +1,4 @@
 {
-  "enabledMcpjsonServers": ["honcho"]
+  "enabledMcpjsonServers": ["honcho"],
+  "advisorModel": "opus"
 }
