@@ -67,6 +67,44 @@ Telegraph style. Operational rules.
 - `~/.claude/settings.json` + `PreToolUse` hooks enforce dangerous-pattern denylist (Phase 7 of onboarding).
 - When a command requires confirmation, ask Chris before executing.
 
+## Model configuration — do not revert
+
+The fleet runs a deliberate two-layer model setup. **Read this before touching any model config.**
+
+### Layer 1: Paperclip adapterConfig (heartbeat runs)
+Every agent's `adapterConfig.model` is set to `deepseek-v4-flash`. This is the model used for all
+Paperclip-dispatched runs. No exceptions — including Juno and Piper.
+
+Verify: `GET /api/agents/{id}` → `adapterConfig.model` should be `deepseek-v4-flash` for all agents.
+
+### Layer 2: Hermes profile config.yaml (gateway / interactive sessions)
+`/opt/hermes-profiles/{agent}/config.yaml` `model.default` controls the model used when the agent
+runs interactively (Slack gateway, Plain CS chat) — **not** via Paperclip heartbeat.
+
+- `juno`, `juno-fon`, `juno-per`: `glm-5.1:cloud` — Slack gateway personality requires it.
+- `piper`: `glm-5.1:cloud` — CS chat persona.
+- All other profiles: `deepseek-v4-flash`.
+
+When Paperclip dispatches a heartbeat run it passes `-m deepseek-v4-flash` explicitly, overriding
+the profile default. The GLM profile defaults only apply to gateway/interactive sessions.
+
+### Why deepseek-v4-flash for heartbeat runs?
+Bakeoff v2 (2026-06-11): deepseek scored 7/7 tool-use tests vs nemotron 6/7 and glm 6/7. Only model
+to pass T5 (real HTTP API call + JSON parse). Ollama Cloud pricing is GPU-time-based (model-size ×
+duration) — deepseek-v4-flash (13B active MoE) is substantially cheaper than glm-5.1 (flagship).
+Prior model `gpt-oss:20b` has a confirmed server-side Ollama Cloud bug (produces no output).
+
+### Wrapper timeouts
+All `/opt/hermes-wrappers/*.sh` use `timeout 1900` (~32 min). This must exceed `adapterConfig.timeoutSec`
+(1800s) by a margin so hermes can do a clean exit before the shell kills it. Raised from 600s→1200s→1900s
+on 2026-06-11 as deepseek API latency (~30-100s/call) requires far more wall-clock than the prior 3B-active
+nemotron model. Do not lower below 1900 without changing adapterConfig.timeoutSec first.
+
+### Do not change these without a bakeoff
+If you believe a model change is warranted, file an AGE issue with the `model-change` label. Do not
+edit adapterConfig or hermes profiles directly as part of another task. These settings are a known-good
+baseline from deliberate evaluation.
+
 ## Voice
 - Direct. Specific. File paths over descriptions. Name what changed and why; don't narrate intent at length.
 - See `writing-editor` skill for Chris's voice patterns when authoring on his behalf (rare for Otis).
