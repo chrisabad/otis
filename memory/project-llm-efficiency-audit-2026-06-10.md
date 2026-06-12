@@ -90,8 +90,52 @@ log lines across agent logs; credential pool rotating keys just delays the wall.
 - [x] **agentos-docs model-routing.mdx**: rewritten, PR #32 open on chrisabad/agentos-docs branch llm-model-strategy
 - [x] **Credential pool**: .env files for all 16 profiles swapped to chrisabad key-b (kaleidoscope maxed)
 
+## CORRECTION (2026-06-10 ~20:xx UTC)
+- Juno IS intentionally on `nemotron-3-nano:30b` in Paperclip adapterConfig. This was a deliberate choice
+  made after the efficiency audit memory was written (memory captured the plan, not the final state).
+- The hermes profile config.yaml still says `glm-5.1:cloud` — that's intentionally mismatched; Paperclip
+  adapterConfig is the override and takes precedence.
+- Do NOT change Juno's model based on the memory saying "Juno kept glm-5.1". Trust the DB as ground truth.
+
+## Bakeoff v2 (2026-06-11) — tool-call correctness evals
+
+**Key finding: tool_use_enforcement config gap.**
+`nemotron` is NOT in Hermes' `TOOL_USE_ENFORCEMENT_MODELS` tuple (defined in
+`/opt/hermes-venv/lib/python3.12/site-packages/agent/prompt_builder.py`).
+With `tool_use_enforcement: auto` (fleet default), nemotron never gets the
+"you MUST call tools, don't describe actions" guidance injected — which GLM, GPT,
+Deepseek, Qwen etc. all receive automatically. Setting enforcement=true actually
+*hurt* nemotron (T3 FAIL: correct execution but wrong YES/NO answer due to
+over-steering).
+
+**v2 results (7 tests, fresh session per test, verifiable tokens):**
+```
+Model                  Enf    T1  T2  T3  T4  T5  T6  T7  Total
+nemotron-3-nano:30b    auto   ✓   ✓   ✓   ✓   T   ✓   ✓   6/7
+nemotron-3-nano:30b    true   ✓   ✓   ✗   ✓   T   ✓   ✓   5/7
+deepseek-v4-flash      auto   ✓   ✓   ✓   ✓   ✓   ✓   ✓   7/7
+deepseek-v4-flash      true   ✓   ✓   ✓   ✓   ✓   ✓   ✓   7/7
+glm-5.1:cloud          auto   ✓   ✓   ✓   ✓   T   ✓   ✓   6/7
+glm-5.1:cloud          true   ✓   ✓   ✓   ✓   T   ✓   ✓   6/7
+```
+T5 = real HTTP API call + JSON parse. deepseek is the ONLY model that completes it.
+GLM and nemotron timeout on T5 — deepseek handles API interaction reliably.
+
+**Decision:** Fleet standard tier switched nemotron → deepseek-v4-flash (2026-06-11).
+- DB + API PATCH (cache invalidation) applied to all 9 agents
+- Hermes profile config.yaml updated on VPS for all 9 profiles
+- enforcement=true NOT applied (counterproductive for nemotron, unnecessary for deepseek)
+- Bakeoff v2 script saved to `evals/bakeoff-v2.py` in this repo
+
+**Lesson:** Production tool-call failures were NOT model quality — they were from
+gateway crashes (constant `gateway.exit_nonzero` restarts) killing mid-session runs.
+nemotron 6/7 in clean eval. The switch to deepseek improves API task completion and
+provides margin for reliability; deepseek-v4-flash is ~4× GPU time (13B vs 3B active)
+but avoids timeout loops from incomplete task execution.
+
 ## Open items
-- [x] deepseek-v4-flash t6 retest — PASS, original failure was stale session context (not self-sabotage). All 6/6 criteria pass. Mid-tier candidate if nemotron capability proves insufficient.
+- [ ] Confirm deepseek runs appear in production stdout (monitoring in progress 2026-06-11)
+- [ ] Investigate gateway restart root cause (constant `exit_nonzero` for Juno profile)
 - [ ] gpt-oss:20b retest when Ollama Cloud server-side bug is resolved
 - [ ] PR #32 merge (agentos-docs)
 - [ ] Paperclip recovery loop backoff implementation (AGE-829, assigned Axel)
