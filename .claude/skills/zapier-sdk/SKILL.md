@@ -5,6 +5,7 @@ description: |
   managing connections, and making authenticated API requests through Zapier's infrastructure.
   Triggers: "zapier sdk", "zapier api", "connect to app", "send slack message from code",
   "integrate with third-party api", "run zapier action", "zapier connection", "zapier tables".
+audience: shared
 ---
 
 # Zapier SDK

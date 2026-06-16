@@ -1,10 +1,11 @@
 ---
-name: zapier-sdk
+name: zapier
 description: |
   Zapier SDK for TypeScript. Use for connecting to 9,000+ apps, running actions,
   managing connections, and making authenticated API requests through Zapier's infrastructure.
   Triggers: "zapier sdk", "zapier api", "connect to app", "send slack message from code",
   "integrate with third-party api", "run zapier action", "zapier connection", "zapier tables".
+audience: shared
 ---
 
 # Zapier SDK
