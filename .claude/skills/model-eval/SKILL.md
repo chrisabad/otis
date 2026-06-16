@@ -94,18 +94,20 @@ curl -s "https://langfuse-lugt.srv1724463.hstgr.cloud/api/public/metrics/daily" 
   -G --data-urlencode "fromTimestamp=2026-06-01T00:00:00Z"
 ```
 
-## Candidate model list (as of 2026-06-15)
+## Candidate model list (as of 2026-06-16)
 
 Ollama Cloud pricing tiers (Low < Medium < High by GPU cost):
 
 | Model | Tier | Status | Notes |
 |---|---|---|---|
+| `ministral-3:3b` | Low | **PASS** — current `lightweight` | Passes simple aux tasks (title gen, approval); not tested against full harness |
 | `gpt-oss:20b` | Low | **BROKEN** — empty content | Returns 0-length content, tokens generated but not returned (Ollama regression 2026-06-15) |
 | `nemotron-3-nano:30b` | Low | **FAILS t6** — unreliable auth | Passed smoke test but failed eval harness; inconsistent curl behavior |
-| `deepseek-v4-flash` | Medium | **PASS** — current `routine` | Was production model (61K obs May-Jun), passes t3/t5/t6 |
-| `glm-5.1:cloud` | High | **PASS** — current `interactive` | Heavy model for Juno/Piper interactive sessions |
-| `gemma4:31b` | ? | **DISQUALIFIED** — fails t6 | Self-sabotages on masked API keys |
-| `ministral-3:14b` | ? | **DISQUALIFIED** — fails t6 | Same auth issue as gemma4 |
+| `deepseek-v4-flash` | Medium | **PASS** — current `routine` | 61K obs May-Jun, passes t3/t5/t6 |
+| `gemma3:12b` | ? | **PASS** — current `vision` | Multimodal; used for vision auxiliary slot only |
+| `gemma4:31b` | ? | **PASS** — current `interactive` | Re-tested 2026-06-16: passes t6×3, t3, t5. Previously disqualified (Ollama regression, now fixed). Juno/Piper. |
+| `glm-5.1:cloud` | High | **PASS** — replaced by gemma4:31b | Was `interactive`; swapped out 2026-06-16 |
+| `ministral-3:14b` | ? | **DISQUALIFIED** — fails t6 | Self-sabotages on masked API keys |
 
 ## Updating LiteLLM alias after eval
 
@@ -138,8 +140,11 @@ for m in json.load(sys.stdin).get('data', []):
 
 ## Current state summary (2026-06-16)
 
-- `routine` alias: `deepseek-v4-flash` ✓ (Medium tier, confirmed passing) — kaleidoscope only (chrisabad removed: Free tier blocks Medium+)
-- `interactive` alias: `glm-5.1:cloud` ✓ (High tier, Juno/Piper) — kaleidoscope only
+- `lightweight` alias: `ministral-3:3b` ✓ (Low tier) — aux tasks: title_gen, approval, mcp, skills_hub, profile_describer
+- `routine` alias: `deepseek-v4-flash` ✓ (Medium tier) — main model for most agents + aux: compression, web_extract, triage, kanban, curator
+- `interactive` alias: `gemma4:31b` ✓ (re-validated 2026-06-16) — Juno/Piper main model
+- `vision` alias: `gemma3:12b` ✓ (multimodal) — vision auxiliary slot fleet-wide
+- All aliases: kaleidoscope credential only (chrisabad Free tier blocks Medium+)
 - `gpt-oss:20b`: BROKEN on Ollama Cloud — recheck monthly when quota resets
 - Hermes Langfuse plugin: DISABLED fleet-wide (LiteLLM→Langfuse is active)
 - LiteLLM admin key: `JKkw1Z0hc7HBsikGRNgz4RnOfqhefxCi`

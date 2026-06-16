@@ -28,3 +28,4 @@ light/routine roles need at least tool-roundtrip + auth-secret + instruction.
 ## Decision history
 
 - 2026-06-03 (AGE-295): two tiers — HEAVY `glm-5.1` (Juno/Quinn/Ellis), LIGHT `gpt-oss:20b` (Axel/Vera/Orion/Dex). `qwen3-coder-next` deprecated (fails t1/t2/t3 in-harness). gpt-oss:20b cleared t6 (auth) — the AGE-325 "switch off gpt-oss" report was refuted.
+- 2026-06-15: LiteLLM proxy introduced. Four semantic aliases: `lightweight` (ministral-3:3b), `routine` (deepseek-v4-flash), `interactive` (gemma4:31b), `vision` (gemma3:12b). `gpt-oss:20b` BROKEN (empty content Ollama regression). `gemma4:31b` re-validated after prior disqualification (t6 passes 3×) — original failure was an Ollama Cloud regression now fixed. `glm-5.1:cloud` retired as `interactive`.
