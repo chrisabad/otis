@@ -1,0 +1,59 @@
+name: Sync shared skills from agentos-skills
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Daily at 06:00 UTC — catches any drift if the agentos-skills trigger misfires
+    - cron: '0 6 * * *'
+
+jobs:
+  sync:
+    name: Copy shared skills into .claude/skills/
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to Tailnet
+        uses: tailscale/github-action@v2
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+
+      - name: Sync via VPS (has GitHub App credentials)
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          echo "$VPS_SSH_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no root@100.117.92.5 bash << 'REMOTE'
+          set -e
+          GH_TOKEN=$(bash /opt/hermes-profiles/juno/bin/mint-github-token.sh --raw)
+          WORK=$(mktemp -d)
+          trap "rm -rf $WORK" EXIT
+
+          git clone --quiet "https://x-access-token:${GH_TOKEN}@github.com/chrisabad/agentos-skills.git" "$WORK/src"
+          git clone --quiet "https://x-access-token:${GH_TOKEN}@github.com/chrisabad/otis.git" "$WORK/dst"
+          cd "$WORK/dst"
+
+          git config user.name "Otis (AGE)"
+          git config user.email "3927680+otis-age[bot]@users.noreply.github.com"
+
+          mkdir -p .claude/skills
+          for skill_dir in "$WORK/src/skills"/*/; do
+            [ -d "$skill_dir" ] || continue
+            skill_name=$(basename "$skill_dir")
+            [ -f "$skill_dir/SKILL.md" ] || continue
+            mkdir -p ".claude/skills/$skill_name"
+            cp "$skill_dir/SKILL.md" ".claude/skills/$skill_name/SKILL.md"
+          done
+
+          git add --force .claude/skills/
+          if git diff --cached --quiet; then
+            echo "otis/.claude/skills already up to date"
+            exit 0
+          fi
+
+          SKILL_COUNT=$(git diff --cached --name-only | grep 'SKILL\.md' | wc -l | tr -d ' ')
+          git commit -m "chore: sync ${SKILL_COUNT} shared skill(s) from agentos-skills [skip ci]"
+          git push
+          echo "Pushed skill updates to chrisabad/otis"
+          REMOTE
+          rm /tmp/deploy_key
