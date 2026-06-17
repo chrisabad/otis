@@ -24,4 +24,15 @@ A SIGHUP at 07:38 UTC caused Postgres to reload the broken config → crash-loop
 - P2: Bind port 54329 to 127.0.0.1 only in docker-compose
 - P3: Remove stale patches 054 and 060
 
-**Why:** The `data/` volume is mounted read-write and agents' terminal tool runs as a host user with full write access to that directory. No guardrails prevented config modification.
+**Why:** The `data/` volume is mounted read-write and agents' terminal tool runs as root on the VPS, with full write access to that directory. No guardrails prevented config modification.
+
+**Second outage (2026-06-17 ~19:00 UTC):** AGE-1107 (P0 hardening subtask) was executed by Ellis — set `chattr +i` on the config files while they were still root-owned (side-effect of Otis's earlier `sed -i`/`cat >` fixes). Result: same crash-loop. Fix: `chattr -i`, restored paperclip ownership, restarted.
+
+**Current state of hardening:**
+- `postgresql.conf`, `pg_hba.conf`, `pg_ident.conf` are `paperclip:paperclip 600` + `chattr +i` — verified working
+- Port 54329 bound to `127.0.0.1` only (AGE-1110 applied)
+- Ellis SOUL.md guardrail merged via agentos-config PR #268 (AGE-1108 done)
+- AGE-1107 (chattr) cancelled (done correctly by Otis instead)
+- AGE-1119 filed: create non-root `hermes-agent` SSH user to structurally limit agent blast radius
+
+**Lesson — when manually fixing DB files as root:** always `chown paperclip:paperclip` + `chmod 600` immediately after writing. Never leave root-owned files in the Postgres data dir. If chattr +i was set, `chattr -i` first, fix, then `chattr +i` again.
